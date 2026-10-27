@@ -18,8 +18,8 @@ import (
 // fetched on demand with c=help, and every result is capped; the rest is kept on
 // disk and paged with c=more.
 
-const compactDesc = `Act on this Windows PC. c=command, a=args object. Paths absolute. Long output is cut; get the rest with more{id}.
-find{path[],name,text} ls{path} read{path,mode:head|lines|grep|text,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command,shell:cmd|powershell} web{action:search|read,query,url} ai{action:ask|summarize,paths[],question} sys{action:info|processes|ports} model{action:list|use|stop,name} more{id} help{c}
+const compactDesc = `Full control of the user's Windows PC: open apps, files and sites, run any command (admin too), read/write/edit files, search, see window text, click buttons, use Chrome. You CAN do these; never say you can't, call this tool. c=command, a=args. Paths absolute. Cut output: more{id}.
+open{target}: app, file, folder or URL. find{path[],name,text} ls{path} read{path,mode:head|lines|grep|text,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command,shell:cmd|powershell} web{action:search|read,query,url} ai{action:ask|summarize,paths[],question} sys{action:info|processes|ports} model{action:list|use|stop,name} more{id} help{c}
 help{c} lists all args; more commands: files job saved browser window media`
 
 var compactTool = json.RawMessage(`{"name":"pc","description":` + strconv.Quote(compactDesc) + `,"inputSchema":{"type":"object","properties":{"c":{"type":"string"},"a":{"type":"object"}},"required":["c"]}}`)
@@ -28,7 +28,7 @@ var compactTool = json.RawMessage(`{"name":"pc","description":` + strconv.Quote(
 var compactAlias = map[string]string{
 	"find": "find", "search": "find",
 	"ls": "scan", "scan": "scan", "dir": "scan", "list": "scan",
-	"read": "read", "cat": "read", "open": "read",
+	"read": "read", "cat": "read",
 	"run": "run", "cmd": "run", "shell": "run", "exec": "run",
 	"web": "web", "browser": "browser", "window": "window", "media": "media",
 	"sys": "system", "system": "system",
@@ -88,6 +88,9 @@ func callCompact(raw json.RawMessage) (string, []toolImage, error) {
 
 func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 	switch c {
+	case "open", "launch", "start", "app":
+		out, err := openTarget(str(a, "target", "app", "path", "url", "name", "file"), str(a, "args"))
+		return out, nil, err
 	case "help", "?":
 		return compactHelp(str(a, "c", "cmd", "command")), nil, nil
 	case "more", "next":
@@ -264,6 +267,8 @@ func compactHelp(c string) string {
 		return compactDesc
 	}
 	switch strings.ToLower(c) {
+	case "open":
+		return "open{target,args}: start an app (notepad, chrome, calc, a full .exe path), open a file/folder in its default app, or a URL in the browser."
 	case "write":
 		return "write{path,content}: create or replace a text file (old version kept for job undo)."
 	case "edit":
@@ -442,4 +447,24 @@ func sortStrings(x []string) {
 			x[j], x[j-1] = x[j-1], x[j]
 		}
 	}
+}
+
+// openTarget starts an app, file, folder or URL the way the Start menu would, and
+// returns at once.
+func openTarget(t, args string) (string, error) {
+	t = strings.TrimSpace(t)
+	if t == "" {
+		return "", errors.New("open needs target: an app (notepad), file, folder or URL")
+	}
+	if !isWin {
+		return "", errors.New("open works on Windows only")
+	}
+	cmdArgs := []string{"/c", "start", "", t}
+	if args != "" {
+		cmdArgs = append(cmdArgs, strings.Fields(args)...)
+	}
+	if err := quietCmd("cmd.exe", cmdArgs...).Run(); err != nil {
+		return "", fmt.Errorf("couldn't open %s: %v", t, err)
+	}
+	return "opened " + t, nil
 }

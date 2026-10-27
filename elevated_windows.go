@@ -620,6 +620,10 @@ func refreshHelper() {
 	if isElevated() || !taskInstalled() {
 		return
 	}
+	if pipeUp() {
+		// The running helper keeps working; the task starts this version at the next sign-in.
+		return
+	}
 	fmt.Println("\nUpdating the elevated helper to this version — Windows will ask once for permission...")
 	if err := elevateSelf("install-helper"); err != nil {
 		fmt.Println("Helper not updated (prompt declined?). Update it later from the menu with h.")
