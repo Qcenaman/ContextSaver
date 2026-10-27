@@ -243,6 +243,41 @@ func secAttrs(sddl string) (*syscall.SecurityAttributes, error) {
 	return &syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), SecurityDescriptor: sd}, nil
 }
 
+// startHelper starts the admin helper (first step of the "Local AI" icon).
+func startHelper() string {
+	if !taskInstalled() {
+		return "Admin helper isn't installed (run once: contextsaver install-helper)"
+	}
+	if pipeUp() {
+		return "Admin helper running"
+	}
+	quietCmd("schtasks", "/Run", "/TN", elevTaskName).Run()
+	for i := 0; i < 40 && !pipeUp(); i++ {
+		time.Sleep(250 * time.Millisecond)
+	}
+	if pipeUp() {
+		return "Admin helper started"
+	}
+	return "Admin helper didn't start"
+}
+
+// stopHelper ends the admin helper; if Windows won't let us end it, its watchdog
+// exits on its own within a minute now that nothing is using it.
+func stopHelper() string {
+	if !pipeUp() {
+		return ""
+	}
+	quietCmd("schtasks", "/End", "/TN", elevTaskName).Run()
+	for i := 0; i < 20 && pipeUp(); i++ {
+		time.Sleep(250 * time.Millisecond)
+	}
+	if pipeUp() {
+		return "Admin helper will stop by itself within a minute"
+	}
+	return "Admin helper stopped"
+}
+
+// While AnythingLLM is open the helper counts as in use.
 // The helper only runs while ContextSaver does (AnythingLLM using a local model):
 // it starts on the first admin command and exits once no ContextSaver tool process
 // is left and no admin command is running.
@@ -252,7 +287,7 @@ func helperWatchdog() {
 	quiet := 0
 	for {
 		time.Sleep(30 * time.Second)
-		if helperActive.Load() > 0 || contextSaverToolRunning() {
+		if helperActive.Load() > 0 || contextSaverToolRunning() || processRunning("anythingllm.exe") {
 			quiet = 0
 			continue
 		}

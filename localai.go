@@ -11,13 +11,17 @@ import (
 
 // Desktop icons: "Local AI" loads the last-used model and opens AnythingLLM;
 // "Stop Local AI" stops every local model and closes AnythingLLM, which also ends
-// ContextSaver and its admin helper.
+// ContextSaver and its admin helper. "Local AI" starts the admin helper first;
+// "Stop Local AI" closes everything.
 
 func anythingLLMExe() string {
 	return filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "AnythingLLM", "AnythingLLM.exe")
 }
 
 func consoleStartLocalAI() int {
+	if msg := startHelper(); msg != "" {
+		fmt.Println(msg)
+	}
 	name := modelForScript(cfg.AIScript)
 	if _, ok := models()[name]; !ok {
 		name = "qwen"
@@ -61,8 +65,32 @@ func consoleStopLocalAI() int {
 		}
 		fmt.Println("AnythingLLM closed")
 	}
+	if stopOtherContextSavers() > 0 {
+		fmt.Println("ContextSaver closed")
+	}
+	if msg := stopHelper(); msg != "" {
+		fmt.Println(msg)
+	}
 	time.Sleep(2 * time.Second)
 	return 0
+}
+
+// stopOtherContextSavers ends ContextSaver tool processes (not this one, not the
+// elevated helper, which stopHelper handles).
+func stopOtherContextSavers() int {
+	ps, err := procs()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, p := range ps {
+		if strings.EqualFold(p.name, "contextsaver.exe") && int(p.pid) != os.Getpid() && !strings.Contains(strings.ToLower(p.cmd), " helper") {
+			if quietCmd("taskkill", "/PID", fmt.Sprint(p.pid), "/T", "/F").Run() == nil {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 func processRunning(exe string) bool {

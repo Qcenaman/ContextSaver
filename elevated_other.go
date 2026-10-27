@@ -23,3 +23,7 @@ func helperStatus() string { return "not available" }
 func refreshHelper() {}
 
 func moveTree(src, dst string) error { return errElevWindowsOnly }
+
+func startHelper() string { return "" }
+
+func stopHelper() string { return "" }
