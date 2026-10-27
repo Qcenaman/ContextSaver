@@ -106,7 +106,20 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		out, err := openTarget(str(a, "target", "app", "path", "url", "name", "file"), str(a, "args"))
 		return out, nil, err
 	case "help", "?":
-		return compactHelp(str(a, "c", "cmd", "command")), nil, nil
+		c := str(a, "c", "cmd", "command")
+		if full, _ := a["full"].(bool); full {
+			return compactHelp(c), nil, nil
+		}
+		k := strings.ToLower(c)
+		if t, ok := compactAlias[k]; ok {
+			if sk, ok := helpKey[t]; ok {
+				k = sk
+			}
+		}
+		if h, ok := shortHelp[k]; ok {
+			return h + "\n(help{c,full:true} = every option)", nil, nil
+		}
+		return compactHelp(c), nil, nil
 	case "more", "next":
 		return moreOut(str(a, "id"), intArg(a, "from")), nil, nil
 	case "remember":
@@ -175,6 +188,9 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 	delete(a, "_note")
 	b, _ := json.Marshal(a)
 	out, imgs, err := callTool(name, b)
+	if err == nil {
+		out = squeeze(out)
+	}
 	if err == nil && note != "" {
 		out = note + out
 	}
@@ -194,7 +210,7 @@ func compactJob(steps []map[string]any, a map[string]any) (string, []toolImage, 
 	}
 	b, _ := json.Marshal(j)
 	out, err := toolRunJob(b)
-	return logLineRe.ReplaceAllString(out, ""), nil, err
+	return squeeze(logLineRe.ReplaceAllString(out, "")), nil, err
 }
 
 // fixArgs accepts the common mistakes small models make: a string where a list
@@ -537,4 +553,53 @@ func openTarget(t, args string) (string, error) {
 		return "", fmt.Errorf("couldn't open %s: %v", t, err)
 	}
 	return "opened " + t, nil
+}
+
+// shortHelp: what a local model needs to call each command, in as few tokens as
+// possible. help{c,full:true} returns the complete description.
+var shortHelp = map[string]string{
+	"find":    "find{path[],name,text,regex,lines(3),limit,include,exclude,min_size,max_size,newer_than,older_than}: files by name/size/date/text, with matching lines.",
+	"ls":      "ls{path,recursive,include,exclude}: folder overview: counts, sizes, types, biggest files.",
+	"read":    "read{path,mode:info|head|tail|lines|grep|text|image,from_line,lines,pattern,context,pages:\"3-5\",changes}: part of a file; Office/PDF as text, pictures via OCR.",
+	"run":     "run{command,shell:cmd|powershell,cwd,elevated,wait_for,keep_running,tail}: exit code, error lines, last lines.",
+	"web":     "web{action:search|read|find|links|ask,query,url,urls[],pattern,question,from_line,lines}: pages as text; ask = answer from pages.",
+	"ai":      "ai{action:ask|summarize|classify,paths[],question,categories[],move_to}: local AI reads files and pictures.",
+	"office":  "office{action,path}\ncreate: .docx/.pdf from Markdown content; .pptx slides split by --- or headings; .xlsx sheets:[{name,rows}] or CSV content; .pdf from:[files, \"a.pdf:2-5\"].\nedit (backup kept; to=save as): replace:[{find,with}], delete_paragraphs, delete_slides:\"2,4\", content, insert_after; xlsx cells:{\"B2\":5}, append_rows; pdf pages:\"3,1-2\", rotate, stamp:\"{n}/{total}\", split.\nread. convert{to:\".pdf\" or file} via Office.",
+	"rag":     "rag: search{query,k,under,ext,scope:all|files|notes,tag} remember{text,tags[]} notes{tag} forget{ids[]} update{paths[],dry_run} status config{roots[],types[],exclude[]}",
+	"sys":     "sys{action:info|processes|ports|kill,filter,port,pids[],name}",
+	"files":   "files{steps:[{op,from[],to}],dry_run}: ops copy move sync delete(Recycle Bin) rename{rules:[{replace,with,template,prefix,suffix,case,ext}]} mkdir download extract edit{edits:[{find,replace}]} write{content}; per step: include exclude recursive newer_than min_size conflict:keep_both|skip|newer|overwrite.",
+	"job":     "job{action:status|list|cancel|undo,id,wait_seconds}",
+	"saved":   "saved{action:list|show|save|remove,name,steps}",
+	"browser": "browser{action:open|text|find|links|click|fill|press|wait|close,url,target,value,pattern,show}: real Chrome, text only.",
+	"window":  "window{action,window:title|program|pid}: list{filter} text ocr{x,y,w,h,boxes} copy wait{pattern} clipboard{text} screenshot{question}\ndo{steps:[{click:name}{type,into}{press}{wait}{click_text,nth}{click_at:[x,y]}{move:[x,y]}{drag:[x1,y1,x2,y2]}{scroll:n}{hold,secs}],button,then:\"text\"}",
+	"media":   "media{action:info|transcript|frames,path,language,timestamps}: audio/video as text.",
+}
+
+var helpKey = map[string]string{"scan": "ls", "system": "sys", "local_ai": "ai", "run_job": "files", "find": "find", "read": "read", "run": "run", "web": "web", "office": "office", "rag": "rag", "job": "job", "saved": "saved", "browser": "browser", "window": "window", "media": "media"}
+
+var (
+	jobHeadRe = regexp.MustCompile(`(?m)^Job \d{8}-\d{9}-[0-9a-f]{4}(?: "[^"\n]*")?: (done|exited|failed|canceled)`)
+	exitedRe  = regexp.MustCompile(`exited with code (-?\d+) after ([\w.]+)`)
+	lastAllRe = regexp.MustCompile(`(?m)^Last (\d+) of (\d+) lines:\n`)
+	fullOutRe = regexp.MustCompile(`(?m)^Full output: .*\n?`)
+)
+
+// squeeze drops boilerplate from finished jobs: the job id (only a running job needs
+// it), "Last N of N lines:", and the log path when every line was shown.
+func squeeze(s string) string {
+	s = jobHeadRe.ReplaceAllString(s, "$1")
+	s = exitedRe.ReplaceAllString(s, "exit $1 ($2)")
+	truncated := false
+	s = lastAllRe.ReplaceAllStringFunc(s, func(m string) string {
+		p := lastAllRe.FindStringSubmatch(m)
+		if p[1] == p[2] {
+			return ""
+		}
+		truncated = true
+		return m
+	})
+	if !truncated && !strings.Contains(s, "Still running") {
+		s = fullOutRe.ReplaceAllString(s, "")
+	}
+	return strings.TrimSpace(s)
 }
