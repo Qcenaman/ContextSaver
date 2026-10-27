@@ -73,3 +73,5 @@ func stopLocalAI(p *aiProc, port int) {
 func quietCmd(name string, args ...string) *exec.Cmd { return exec.Command(name, args...) }
 
 func pidOnPort(port int) int { return 0 }
+
+func stopOwnLocalAI(p *aiProc, port, ownPID int) { stopLocalAI(p, port) }

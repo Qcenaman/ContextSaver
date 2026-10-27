@@ -339,3 +339,22 @@ func pidOnPort(port int) int {
 	}
 	return 0
 }
+
+// stopOwnLocalAI stops a model this app started: the script's own process tree, and
+// the server on port only if it is still ownPID. Another model loaded on the port
+// since then (a model switch) is left running.
+func stopOwnLocalAI(p *aiProc, port, ownPID int) {
+	if p.cmd.Process != nil && !p.exited() {
+		quietCmd("taskkill", "/PID", strconv.Itoa(p.cmd.Process.Pid), "/T", "/F").Run()
+	}
+	if ownPID <= 0 {
+		return
+	}
+	for i := 0; i < 5; i++ {
+		if pidOnPort(port) != ownPID {
+			return
+		}
+		quietCmd("taskkill", "/PID", strconv.Itoa(ownPID), "/T", "/F").Run()
+		time.Sleep(time.Second)
+	}
+}

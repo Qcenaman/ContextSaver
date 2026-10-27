@@ -515,7 +515,10 @@ func openAI(j *Job, want string) (*aiClient, func(), error) {
 		if err != nil {
 			return nil, noop, fmt.Errorf("couldn't start %s: %v", cfg.AIScript, err)
 		}
-		stop := func() { stopLocalAI(p, port) }
+		// Stop only what this job started: the script, and the server on the port
+		// only while it is still the one that came up for this job.
+		ownPID := 0
+		stop := func() { stopOwnLocalAI(p, port, ownPID) }
 		deadline := time.Now().Add(5 * time.Minute)
 		var exitedAt time.Time
 		for time.Now().Before(deadline) {
@@ -524,6 +527,7 @@ func openAI(j *Job, want string) (*aiClient, func(), error) {
 				return nil, noop, errCanceled
 			}
 			if c.healthy() {
+				ownPID = pidOnPort(port)
 				return finish(stop)
 			}
 			if exitedAt.IsZero() && p.exited() {
