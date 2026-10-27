@@ -322,8 +322,9 @@ func stopAllModels(port int, keepPort bool) []string {
 	if keepPort {
 		keep = pidOnPort(port)
 	}
-	if pid := pidOnPort(port); pid > 0 && !keepPort {
-		if m := servedModels("127.0.0.1", port); len(m) > 0 {
+	portPID := pidOnPort(port)
+	if pid := portPID; pid > 0 && !keepPort {
+		if m := uniq(servedModels("127.0.0.1", port)); len(m) > 0 {
 			stopped = append(stopped, strings.Join(m, ","))
 		} else {
 			stopped = append(stopped, fmt.Sprintf("server on port %d", port))
@@ -333,7 +334,7 @@ func stopAllModels(port int, keepPort bool) []string {
 	if ps, err := procs(); err == nil {
 		self := os.Getpid()
 		for _, p := range ps {
-			if p.pid == self || (keep > 0 && p.pid == keep) {
+			if p.pid == self || p.pid == portPID || (keep > 0 && p.pid == keep) {
 				continue
 			}
 			n := strings.ToLower(strings.TrimSuffix(p.name, ".exe"))
@@ -420,4 +421,16 @@ func unloadLMStudio() []string {
 func runWithTimeout(d time.Duration, name string, args ...string) error {
 	_, err := runQuiet(d, name, args...)
 	return err
+}
+
+func uniq(xs []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, x := range xs {
+		if !seen[x] {
+			seen[x] = true
+			out = append(out, x)
+		}
+	}
+	return out
 }
