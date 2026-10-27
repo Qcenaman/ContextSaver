@@ -104,7 +104,8 @@ type textOpts struct {
 	ocrWait time.Duration
 	pages   map[int]bool
 	ctx     context.Context
-	ocrUpTo int // only OCR scanned pages up to this page (0 = all)
+	ocrUpTo int  // only OCR scanned pages up to this page (0 = all)
+	legacy  bool // open .doc/.xls/.ppt through the installed Office
 }
 
 func extractText(p string, limit int) (string, error) { return extractTextOpt(p, limit, textOpts{}) }
@@ -122,9 +123,19 @@ func extractTextOpt(p string, limit int, o textOpts) (string, error) {
 	case "pptx":
 		return zipText(p, func(n string) bool { return strings.HasPrefix(n, "ppt/slides/slide") && strings.HasSuffix(n, ".xml") }, limit)
 	case "xlsx":
-		return zipText(p, func(n string) bool { return n == "xl/sharedStrings.xml" }, limit)
+		return xlsxText(p, "", limit)
 	case "odf":
 		return zipText(p, func(n string) bool { return n == "content.xml" }, limit)
+	}
+	if _, ok := legacyOffice[ext]; ok {
+		if !o.legacy {
+			return "", errBinary
+		}
+		np, err := legacyCopy(p)
+		if err != nil {
+			return "", err
+		}
+		return extractTextOpt(np, limit, o)
 	}
 	t, err := readTextFile(p, limit)
 	if err != nil {

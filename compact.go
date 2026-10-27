@@ -18,8 +18,8 @@ import (
 // fetched on demand with c=help, and every result is capped; the rest is kept on
 // disk and paged with c=more.
 
-const compactDesc = `Full control of the user's Windows PC: open apps, files and sites, run any command (admin too), read/write/edit files, search, see window text, click buttons, use Chrome. You CAN do these; never say you can't, call this tool. c=command, a=args. Paths absolute. Cut output: more{id}.
-open{target}: app, file, folder or URL. find{path[],name,text} ls{path} read{path,mode:head|lines|grep|text,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command,shell:cmd|powershell} web{action:search|read,query,url} ai{action:ask|summarize,paths[],question} sys{action:info|processes|ports} model{action:list|use|stop,name} more{id} help{c}
+const compactDesc = `Full control of the user's Windows PC: open apps, files and sites, run any command (admin too), read/write/edit files, make and edit Word/Excel/PowerPoint/PDF, search, see window text, click buttons, use Chrome. You CAN do these; never say you can't, call this tool. c=command, a=args. Paths absolute. Cut output: more{id}.
+open{target}: app, file, folder or URL. find{path[],name,text} ls{path} read{path,mode:head|lines|grep|text,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command,shell:cmd|powershell} web{action:search|read,query,url} ai{action:ask|summarize,paths[],question} office{action:create|edit|read|convert,path,content} sys{action:info|processes|ports} model{action:list|use|stop,name} more{id} help{c}
 help{c} lists all args; more commands: files job saved browser window media`
 
 var compactTool = json.RawMessage(`{"name":"pc","description":` + strconv.Quote(compactDesc) + `,"inputSchema":{"type":"object","properties":{"c":{"type":"string"},"a":{"type":"object"}},"required":["c"]}}`)
@@ -33,6 +33,7 @@ var compactAlias = map[string]string{
 	"web": "web", "browser": "browser", "window": "window", "media": "media",
 	"sys": "system", "system": "system",
 	"ai": "local_ai", "local_ai": "local_ai",
+	"office": "office", "doc": "office", "word": "office", "excel": "office", "xlsx": "office", "docx": "office", "pptx": "office", "pdf": "office", "powerpoint": "office",
 	"job": "job", "jobs": "job", "files": "run_job", "run_job": "run_job", "saved": "saved",
 }
 
@@ -237,6 +238,20 @@ func fixArgs(tool string, a map[string]any) {
 			a["max_chars"] = maxOut()
 		}
 	case "window", "browser":
+		if _, ok := a["max_chars"]; !ok {
+			a["max_chars"] = maxOut()
+		}
+	case "office":
+		rename("path", "file", "target")
+		if _, ok := a["action"]; !ok {
+			if a["content"] != nil || a["sheets"] != nil {
+				a["action"] = "create"
+			} else if a["replace"] != nil || a["cells"] != nil || a["append_rows"] != nil || a["stamp"] != nil {
+				a["action"] = "edit"
+			} else {
+				a["action"] = "read"
+			}
+		}
 		if _, ok := a["max_chars"]; !ok {
 			a["max_chars"] = maxOut()
 		}

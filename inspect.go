@@ -578,7 +578,7 @@ func readText(a readArgs) (string, error) {
 		lines = strings.Split(t, "\n")[1:]
 		offset = -1
 	} else {
-		o := textOpts{ocrWait: 40 * time.Second, pages: pageSet}
+		o := textOpts{ocrWait: 40 * time.Second, pages: pageSet, legacy: true}
 		if (mode == "head" || mode == "text") && pageSet == nil {
 			o.ocrUpTo = 5
 		}
