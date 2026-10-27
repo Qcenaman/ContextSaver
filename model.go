@@ -20,6 +20,7 @@ var defaultModels = map[string]string{
 	"qwen":     `D:\llama.cpp\start-qwen3.6-27b-nothink.bat`,
 	"oss":      `D:\llama.cpp\start-gpt-oss-120b.bat`,
 	"oss-fast": `D:\llama.cpp\start-gpt-oss-120b-SPEC.bat`,
+	"oss-free": `D:\llama.cpp\start-gpt-oss-120b-derestricted.bat`,
 }
 
 func models() map[string]string {

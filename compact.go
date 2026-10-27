@@ -274,7 +274,7 @@ func compactHelp(c string) string {
 	case "edit":
 		return "edit{path,find,replace,regex}: replace text in a file. Or edits:[{find,replace,regex,count}], or append:text."
 	case "model":
-		return "model{action:list|use|stop,name}: list = models and which is loaded; use name=qwen|oss|oss-fast loads it on port 8080 (the chat pauses until it's loaded); stop unloads it."
+		return "model{action:list|use|stop,name}: list = models and which is loaded; use name=qwen|oss|oss-fast|oss-free loads it on port 8080 (the chat pauses until it's loaded); stop unloads it."
 	case "more":
 		return "more{id,from}: next part of a cut result; from = character offset."
 	}

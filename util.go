@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -58,7 +59,7 @@ func initApp() {
 		os.MkdirAll(filepath.Join(appHome, d), 0o755)
 	}
 	if b, err := os.ReadFile(filepath.Join(appHome, "config.json")); err == nil {
-		json.Unmarshal(b, &cfg)
+		json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &cfg)
 	}
 	if cfg.Workers <= 0 {
 		cfg.Workers = 4
