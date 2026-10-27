@@ -19,7 +19,7 @@ import (
 // disk and paged with c=more.
 
 const compactDesc = `Full control of the user's Windows PC: open apps, files and sites, run any command (admin too), read/write/edit files, make and edit Word/Excel/PowerPoint/PDF, search, see window text, click buttons, use Chrome. You CAN do these; never say you can't, call this tool. c=command, a=args. Paths absolute. Cut output: more{id}.
-open{target}: app, file, folder or URL. find{path[],name,text} ls{path} read{path,mode:head|lines|grep|text,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command,shell:cmd|powershell} web{action:search|read,query,url} ai{action:ask|summarize,paths[],question} office{action:create|edit|read|convert,path,content} sys{action:info|processes|ports} model{action:list|use|stop,name} more{id} help{c}
+open{target}: app, file, folder or URL. find{path[],name,text} ls{path} read{path,mode:head|lines|grep|text,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command,shell:cmd|powershell} web{action:search|read,query,url} ai{action:ask|summarize,paths[],question} office{action:create|edit|read|convert,path,content} sys{action:info|processes|ports} model{action:list|use|stop,name} (loading one stops all other local models) more{id} help{c}
 help{c} lists all args; more commands: files job saved browser window media`
 
 var compactTool = json.RawMessage(`{"name":"pc","description":` + strconv.Quote(compactDesc) + `,"inputSchema":{"type":"object","properties":{"c":{"type":"string"},"a":{"type":"object"}},"required":["c"]}}`)
@@ -96,6 +96,13 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		return compactHelp(str(a, "c", "cmd", "command")), nil, nil
 	case "more", "next":
 		return moreOut(str(a, "id"), intArg(a, "from")), nil, nil
+	case "load", "switch", "use":
+		a["action"] = "use"
+		if str(a, "name", "model") == "" {
+			a["name"] = str(a, "target", "to")
+		}
+		out, err := toolModel(a)
+		return out, nil, err
 	case "model", "models":
 		out, err := toolModel(a)
 		return out, nil, err
@@ -135,6 +142,10 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 			return "", nil, errors.New("edit needs find+replace, edits[] or append")
 		}
 		return compactJob([]map[string]any{st}, a)
+	}
+	if _, isModel := models()[c]; isModel {
+		out, err := useModel(c, 45)
+		return out, nil, err
 	}
 	name, ok := compactAlias[c]
 	if !ok {

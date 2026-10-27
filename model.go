@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,13 +173,13 @@ func useModel(name string, waitSecs int) (string, error) {
 	for _, m := range servedModels(host, port) {
 		if al != "" && strings.EqualFold(m, al) {
 			setAIScript(s)
-			return name + " is already loaded", nil
+			return name + " is already loaded" + stoppedNote(stopAllModels(port, true)), nil
 		}
 	}
 	if w := gpuBusyExcept(port); w != "" {
 		return "", errors.New("not switching: " + w + ". Stop that first or switch from the ContextSaver shortcut")
 	}
-	killPort(port)
+	stopped := stopAllModels(port, false)
 	setAIScript(s)
 	if _, err := startScript(s); err != nil {
 		return "", fmt.Errorf("couldn't start %s: %v", s, err)
@@ -187,19 +188,19 @@ func useModel(name string, waitSecs int) (string, error) {
 	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Second)
 		if len(servedModels(host, port)) > 0 && !serverLoading(host, port) {
-			return name + " loaded on port " + fmt.Sprint(port), nil
+			return name + " loaded on port " + fmt.Sprint(port) + stoppedNote(stopped), nil
 		}
 	}
-	return name + " is loading on port " + fmt.Sprint(port) + "; check with model{action:list}", nil
+	return name + " is loading on port " + fmt.Sprint(port) + stoppedNote(stopped) + "; check with model{action:list}", nil
 }
 
 func stopModel() string {
-	host, port := scriptAddr(firstScript())
-	if len(servedModels(host, port)) == 0 && !serverLoading(host, port) && !portOpen(port) {
+	_, port := scriptAddr(firstScript())
+	stopped := stopAllModels(port, false)
+	if len(stopped) == 0 {
 		return "nothing loaded"
 	}
-	killPort(port)
-	return "model stopped, VRAM freed"
+	return "stopped " + strings.Join(stopped, ", ") + "; VRAM freed"
 }
 
 func setAIScript(s string) {
@@ -300,4 +301,123 @@ func writeModelShortcuts(exe string) {
 		os.WriteFile(filepath.Join(dir, "Use model - "+n+".cmd"), []byte("@\""+exe+"\" model "+n+"\r\n@timeout /t 4 >nul\r\n"), 0o644)
 	}
 	os.WriteFile(filepath.Join(dir, "Stop model.cmd"), []byte("@\""+exe+"\" model stop\r\n@timeout /t 3 >nul\r\n"), 0o644)
+}
+
+func stoppedNote(stopped []string) string {
+	if len(stopped) == 0 {
+		return ""
+	}
+	return " (stopped " + strings.Join(stopped, ", ") + ")"
+}
+
+// localModelProcs are programs that serve a local model and hold VRAM while running.
+var localModelProcs = []string{"llama-server", "llama-cli", "llama-run", "koboldcpp", "llamafile", "text-generation-launcher", "lemonade-server"}
+
+// stopAllModels stops every local model, not only the one on port: other llama.cpp
+// servers on any port, KoboldCpp, models loaded in Ollama and in LM Studio.
+// It returns what it stopped.
+func stopAllModels(port int, keepPort bool) []string {
+	var stopped []string
+	keep := 0
+	if keepPort {
+		keep = pidOnPort(port)
+	}
+	if pid := pidOnPort(port); pid > 0 && !keepPort {
+		if m := servedModels("127.0.0.1", port); len(m) > 0 {
+			stopped = append(stopped, strings.Join(m, ","))
+		} else {
+			stopped = append(stopped, fmt.Sprintf("server on port %d", port))
+		}
+		killPort(port)
+	}
+	if ps, err := procs(); err == nil {
+		self := os.Getpid()
+		for _, p := range ps {
+			if p.pid == self || (keep > 0 && p.pid == keep) {
+				continue
+			}
+			n := strings.ToLower(strings.TrimSuffix(p.name, ".exe"))
+			n = strings.TrimSuffix(n, ".EXE")
+			for _, w := range localModelProcs {
+				if strings.HasPrefix(n, w) {
+					killTree(p.pid)
+					stopped = append(stopped, fmt.Sprintf("%s (pid %d)", p.name, p.pid))
+					break
+				}
+			}
+		}
+	}
+	stopped = append(stopped, unloadOllama()...)
+	stopped = append(stopped, unloadLMStudio()...)
+	return stopped
+}
+
+// unloadOllama asks Ollama to drop every loaded model; Ollama itself keeps running.
+func unloadOllama() []string {
+	hc := &http.Client{Timeout: 3 * time.Second}
+	resp, err := hc.Get("http://127.0.0.1:11434/api/ps")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var r struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&r) != nil {
+		return nil
+	}
+	var out []string
+	for _, m := range r.Models {
+		b, _ := json.Marshal(map[string]any{"model": m.Name, "keep_alive": 0})
+		hc2 := &http.Client{Timeout: 30 * time.Second}
+		if rr, err := hc2.Post("http://127.0.0.1:11434/api/generate", "application/json", bytes.NewReader(b)); err == nil {
+			rr.Body.Close()
+			out = append(out, "Ollama "+m.Name)
+		}
+	}
+	return out
+}
+
+// unloadLMStudio unloads LM Studio's models with its lms command, when LM Studio has one loaded.
+func unloadLMStudio() []string {
+	hc := &http.Client{Timeout: 3 * time.Second}
+	resp, err := hc.Get("http://127.0.0.1:1234/api/v0/models")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var r struct {
+		Data []struct {
+			ID    string `json:"id"`
+			State string `json:"state"`
+		} `json:"data"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&r) != nil {
+		return nil
+	}
+	var loaded []string
+	for _, m := range r.Data {
+		if m.State == "loaded" {
+			loaded = append(loaded, "LM Studio "+m.ID)
+		}
+	}
+	if len(loaded) == 0 {
+		return nil
+	}
+	h, _ := os.UserHomeDir()
+	lms := filepath.Join(h, ".lmstudio", "bin", "lms.exe")
+	if !exists(lms) {
+		lms = "lms"
+	}
+	if err := runWithTimeout(30*time.Second, lms, "unload", "--all"); err != nil {
+		return nil
+	}
+	return loaded
+}
+
+func runWithTimeout(d time.Duration, name string, args ...string) error {
+	_, err := runQuiet(d, name, args...)
+	return err
 }
