@@ -243,7 +243,6 @@ func consoleInstall() {
 		fmt.Printf("\nAdd this to the \"mcpServers\" section of AnythingLLM's anythingllm_mcp_servers.json by hand:\n  \"contextsaver\": {\"command\": %q, \"args\": [\"mcp\"]}\n", target)
 	}
 	refreshHelper()
-	migrateOldInstall()
 	os.MkdirAll(jobsFolder(), 0o755)
 	os.WriteFile(filepath.Join(jobsFolder(), "Open ContextSaver.cmd"), []byte("@\""+target+"\"\r\n"), 0o644)
 	writeModelShortcuts(target)
