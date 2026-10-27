@@ -1,0 +1,365 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+)
+
+type rpcReq struct {
+	ID     json.RawMessage `json:"id,omitempty"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params,omitempty"`
+}
+
+const serverInstructions = `Use the pc tool for anything on this PC; help{c} shows a command's args.`
+
+func serveMCP(in io.Reader, out io.Writer) {
+	resumeNotifier()
+	sc := bufio.NewScanner(in)
+	sc.Buffer(make([]byte, 1<<20), 64<<20)
+	var wmu sync.Mutex
+	send := func(v any) {
+		b, _ := json.Marshal(v)
+		wmu.Lock()
+		out.Write(append(b, '\n'))
+		wmu.Unlock()
+	}
+	var wg sync.WaitGroup
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var req rpcReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			send(map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32700, "message": "parse error"}})
+			continue
+		}
+		if len(req.ID) == 0 || string(req.ID) == "null" {
+			continue
+		}
+		wg.Add(1)
+		go func(req rpcReq) {
+			defer wg.Done()
+			send(handleRPC(req))
+		}(req)
+	}
+	wg.Wait()
+	waitAllJobs()
+}
+
+func handleRPC(req rpcReq) map[string]any {
+	resp := map[string]any{"jsonrpc": "2.0", "id": req.ID}
+	switch req.Method {
+	case "initialize":
+		var p struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		json.Unmarshal(req.Params, &p)
+		v := p.ProtocolVersion
+		if v == "" {
+			v = "2025-06-18"
+		}
+		resp["result"] = map[string]any{
+			"protocolVersion": v,
+			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+			"serverInfo":      map[string]any{"name": "contextsaver", "version": appVersion},
+			"instructions":    serverInstructions,
+		}
+	case "ping":
+		resp["result"] = map[string]any{}
+	case "tools/list":
+		resp["result"] = map[string]any{"tools": []json.RawMessage{compactTool}}
+	case "tools/call":
+		var p struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp["error"] = map[string]any{"code": -32602, "message": "bad params"}
+			return resp
+		}
+		if len(p.Arguments) == 0 || string(p.Arguments) == "null" {
+			p.Arguments = json.RawMessage("{}")
+		}
+		text, imgs, err := callTool(p.Name, p.Arguments)
+		isErr := err != nil
+		if isErr {
+			text, imgs = err.Error(), nil
+		}
+		content := []map[string]any{{"type": "text", "text": text}}
+		for _, im := range imgs {
+			content = append(content, map[string]any{"type": "image", "data": base64.StdEncoding.EncodeToString(im.data), "mimeType": im.mime})
+		}
+		resp["result"] = map[string]any{"content": content, "isError": isErr}
+	default:
+		resp["error"] = map[string]any{"code": -32601, "message": "method not found: " + req.Method}
+	}
+	return resp
+}
+
+type toolImage struct {
+	data []byte
+	mime string
+}
+
+func callTool(name string, args json.RawMessage) (out string, imgs []toolImage, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("internal error: %v", r)
+		}
+	}()
+	switch name {
+	case "pc":
+		return callCompact(args)
+	case "scan":
+		out, err = toolScan(args)
+	case "find":
+		out, err = toolFind(args)
+	case "read":
+		return toolRead(args)
+	case "run_job":
+		out, err = toolRunJob(args)
+	case "job":
+		out, err = toolJob(args)
+	case "saved":
+		out, err = toolSaved(args)
+	case "local_ai":
+		out, err = toolLocalAI(args)
+	case "run":
+		out, err = toolRun(args)
+	case "system":
+		out, err = toolSystem(args)
+	case "web":
+		out, err = toolWeb(args)
+	case "window":
+		out, err = toolWindow(args)
+	case "browser":
+		out, err = toolBrowser(args)
+	case "media":
+		out, err = toolMedia(args)
+	default:
+		err = fmt.Errorf("unknown tool %q", name)
+	}
+	return
+}
+
+func waitSecs(p *int, def, maxV int) int {
+	if p == nil {
+		return def
+	}
+	return min(max(*p, 0), maxV)
+}
+
+func toolRunJob(raw json.RawMessage) (string, error) {
+	var a struct {
+		Steps  []Step `json:"steps"`
+		Saved  string `json:"saved"`
+		Name   string `json:"name"`
+		DryRun bool   `json:"dry_run"`
+		Notify bool   `json:"notify"`
+		Wait   *int   `json:"wait_seconds"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", fmt.Errorf("bad arguments: %v", err)
+	}
+	if a.Saved != "" {
+		sj, err := loadSaved(a.Saved)
+		if err != nil {
+			return "", err
+		}
+		a.Steps, a.Name = sj.Steps, sj.Name
+	}
+	if err := validateSteps(a.Steps); err != nil {
+		return "", err
+	}
+	j, err := newJob(JobSpec{Name: a.Name, Kind: "files", Steps: a.Steps, DryRun: a.DryRun, Source: "chat"})
+	if err != nil {
+		return "", err
+	}
+	j.start()
+	waitJob(j, waitSecs(a.Wait, 15, 50))
+	s := j.snapshot()
+	return withNotify(formatState(&s), &s, a.Notify), nil
+}
+
+func toolJob(raw json.RawMessage) (string, error) {
+	var a struct {
+		Action string `json:"action"`
+		ID     string `json:"id"`
+		DryRun bool   `json:"dry_run"`
+		Wait   *int   `json:"wait_seconds"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", err
+	}
+	switch strings.ToLower(a.Action) {
+	case "list":
+		return listJobs(15), nil
+	case "cancel":
+		id, err := resolveJobID(a.ID)
+		if err != nil {
+			return "", err
+		}
+		return cancelJob(id), nil
+	case "undo":
+		if a.ID == "" {
+			return "", errors.New("undo needs the job id")
+		}
+		id, err := resolveJobID(a.ID)
+		if err != nil {
+			return "", err
+		}
+		j, err := newJob(JobSpec{Name: "undo " + id, Kind: "undo", UndoOf: id, DryRun: a.DryRun, Source: "chat"})
+		if err != nil {
+			return "", err
+		}
+		j.start()
+		waitJob(j, waitSecs(a.Wait, 20, 50))
+		s := j.snapshot()
+		return formatState(&s), nil
+	case "notify":
+		id, err := resolveJobID(a.ID)
+		if err != nil {
+			return "", err
+		}
+		s, err := loadState(id)
+		if err != nil {
+			return "", err
+		}
+		return withNotify(formatState(s), s, true), nil
+	case "", "status":
+		id, err := resolveJobID(a.ID)
+		if err != nil {
+			return "", err
+		}
+		if v, ok := running.Load(id); ok {
+			waitJob(v.(*Job), waitSecs(a.Wait, 0, 50))
+		}
+		s, err := loadState(id)
+		if err != nil {
+			return "", err
+		}
+		return formatState(s), nil
+	}
+	return "", errors.New("action must be status, list, cancel, undo or notify")
+}
+
+func toolSaved(raw json.RawMessage) (string, error) {
+	var a struct {
+		Action      string `json:"action"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Steps       []Step `json:"steps"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", err
+	}
+	switch strings.ToLower(a.Action) {
+	case "", "list":
+		list := listSaved()
+		if len(list) == 0 {
+			return "No saved jobs yet.", nil
+		}
+		var b strings.Builder
+		for _, s := range list {
+			fmt.Fprintf(&b, "%s — %s", s.Name, clip(describeSteps(s.Steps), 160))
+			if s.Description != "" {
+				b.WriteString(" (" + s.Description + ")")
+			}
+			b.WriteString("\n")
+		}
+		return strings.TrimRight(b.String(), "\n"), nil
+	case "show":
+		s, err := loadSaved(a.Name)
+		if err != nil {
+			return "", err
+		}
+		b, _ := json.Marshal(s.Steps)
+		return s.Name + ": " + string(b), nil
+	case "save":
+		p, err := saveJob(SavedJob{Name: a.Name, Description: a.Description, Steps: a.Steps})
+		if err != nil {
+			return "", err
+		}
+		msg := fmt.Sprintf("Saved %q. Run it with run_job saved=%q.", strings.TrimSpace(a.Name), strings.TrimSpace(a.Name))
+		if p != "" {
+			msg += " The user can run it by double-clicking " + p
+		}
+		return msg, nil
+	case "remove":
+		if err := removeSaved(a.Name); err != nil {
+			return "", err
+		}
+		return "Removed saved job " + a.Name + ".", nil
+	}
+	return "", errors.New("action must be list, show, save or remove")
+}
+
+func toolLocalAI(raw json.RawMessage) (string, error) {
+	var a struct {
+		AIRequest
+		DryRun bool `json:"dry_run"`
+		Notify bool `json:"notify"`
+		Wait   *int `json:"wait_seconds"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", err
+	}
+	req := a.AIRequest
+	req.Action = strings.ToLower(req.Action)
+	switch req.Action {
+	case "models":
+		return aiModelsText(), nil
+	case "ask":
+		if req.Question == "" {
+			return "", errors.New("ask needs question")
+		}
+	case "summarize":
+	case "classify":
+		if len(req.Categories) < 2 {
+			return "", errors.New("classify needs at least 2 categories")
+		}
+	default:
+		return "", errors.New("action must be ask, summarize, classify or models")
+	}
+	if len(req.Paths) == 0 {
+		return "", errors.New("give paths: files or folders to read")
+	}
+	if !req.Force {
+		if w := gpuWarning(); w != "" {
+			return w, nil
+		}
+	}
+	j, err := newJob(JobSpec{Name: "local AI " + req.Action, Kind: "ai", AI: &req, DryRun: a.DryRun, Source: "chat"})
+	if err != nil {
+		return "", err
+	}
+	j.start()
+	waitJob(j, waitSecs(a.Wait, 40, 50))
+	s := j.snapshot()
+	return withNotify(formatState(&s), &s, a.Notify), nil
+}
+
+var toolDefs = []json.RawMessage{
+	json.RawMessage(`{"name":"scan","description":"Folder overview: file count, size, types, dates, largest files, subfolders. Use instead of listing.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"},"include":{"type":"string"},"exclude":{"type":"string"}},"required":["path"]}}`),
+	json.RawMessage(`{"name":"find","description":"Find files by name, size, date and/or text inside (text, code, Office, PDF) in many folders at once; returns matches with matching lines. all:true also searches cache folders.","inputSchema":{"type":"object","properties":{"path":{"type":"array","items":{"type":"string"}},"name":{"type":"string"},"text":{"type":"string"},"regex":{"type":"boolean"},"case_sensitive":{"type":"boolean"},"include":{"type":"string"},"exclude":{"type":"string"},"min_size":{"type":"string"},"max_size":{"type":"string"},"newer_than":{"type":"string"},"older_than":{"type":"string"},"recursive":{"type":"boolean"},"limit":{"type":"integer"},"all":{"type":"boolean"}},"required":["path"]}}`),
+	json.RawMessage(`{"name":"read","description":"Read part of a file: info, head, tail, lines, grep, text (Office/HTML/PDF as text; scans and pictures via OCR). pages: PDF pages, e.g. 3-5. image: small copy of a picture or PDF page (max_px, default 800). values: values of keys in JSON files plus strings ending in ext (e.g. a ComfyUI workflow's nodes and models). changes:true: only lines new or gone since your last changes read.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"mode":{"type":"string","enum":["info","head","tail","lines","grep","text","image","values"]},"lines":{"type":"integer"},"from_line":{"type":"integer"},"pattern":{"type":"string"},"regex":{"type":"boolean"},"context":{"type":"integer"},"max_chars":{"type":"integer"},"keys":{"type":"array","items":{"type":"string"}},"ext":{"type":"string"},"pages":{"type":"string"},"max_px":{"type":"integer"},"changes":{"type":"boolean"}},"required":["path"]}}`),
+	json.RawMessage(`{"name":"run_job","description":"File operations as a background job, any number of files; steps run in order. Ops: copy/move {from,to} (conflict keep_both|skip|newer|overwrite; contents_only; flatten), sync {from,to,delete_extra}, delete {from} (Recycle Bin only), rename {from,rules: replace+with (regex), template, case, prefix, suffix, ext; on_conflict; counter; sort}, mkdir {to}, download {from: URLs, to, name, sha256}, extract {from, to}, edit {from, edits:[{find,replace,regex,count}], append}, write {to, content}. Filters: include/exclude (wildcards; separated), recursive, min_size/max_size, newer_than/older_than (30d, 6m, a date). Name tokens: {name} {ext} {parent} {n:3} {date:YYYY-MM-DD} {taken:...}. Dry-run first for delete, rename, overwrite and delete_extra. saved runs a saved job; notify signals when it ends.","inputSchema":{"type":"object","properties":{"steps":{"type":"array","items":{"type":"object","properties":{"op":{"type":"string","enum":["copy","move","sync","delete","rename","mkdir","download","extract","edit","write"]},"from":{"type":"array","items":{"type":"string"}},"to":{"type":"string"},"contents_only":{"type":"boolean"},"flatten":{"type":"boolean"},"conflict":{"type":"string","enum":["keep_both","skip","newer","overwrite"]},"delete_extra":{"type":"boolean"},"rules":{"type":"array","items":{"type":"object","properties":{"replace":{"type":"string"},"with":{"type":"string"},"regex":{"type":"boolean"},"ignore_case":{"type":"boolean"},"template":{"type":"string"},"case":{"type":"string","enum":["lower","upper","title","sentence"]},"prefix":{"type":"string"},"suffix":{"type":"string"},"ext":{"type":"string"},"ext_case":{"type":"string","enum":["lower","upper"]},"trim":{"type":"boolean"}}}},"on_conflict":{"type":"string","enum":["stop","number","skip"]},"counter":{"type":"string","enum":["folder","global"]},"sort":{"type":"string","enum":["name","date","taken","size"]},"start":{"type":"integer"},"folders":{"type":"boolean"},"include":{"type":"string"},"exclude":{"type":"string"},"recursive":{"type":"boolean"},"min_size":{"type":"string"},"max_size":{"type":"string"},"newer_than":{"type":"string"},"older_than":{"type":"string"},"verify":{"type":"string","enum":["size","hash","none"]},"workers":{"type":"integer"},"remove_empty_dirs":{"type":"boolean"},"name":{"type":"string"},"sha256":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"find":{"type":"string"},"replace":{"type":"string"},"regex":{"type":"boolean"},"count":{"type":"integer"}},"required":["find"]}},"append":{"type":"string"},"content":{"type":"string"}},"required":["op"]}},"saved":{"type":"string"},"name":{"type":"string"},"dry_run":{"type":"boolean"},"wait_seconds":{"type":"integer"},"notify":{"type":"boolean"}}}}`),
+	json.RawMessage(`{"name":"job","description":"Jobs: status (no id = latest; wait_seconds), list, cancel, undo (restores moved/renamed/deleted/replaced files; dry_run), notify (signal through GitHub when it ends, with a shell command to wait for it instead of polling).","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["status","list","cancel","undo","notify"]},"id":{"type":"string"},"dry_run":{"type":"boolean"},"wait_seconds":{"type":"integer"}}}}`),
+	json.RawMessage(`{"name":"saved","description":"Saved jobs the user can re-run by double-click: list, show, save (name, steps like run_job, description), remove. Run one with run_job saved=name.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["list","show","save","remove"]},"name":{"type":"string"},"description":{"type":"string"},"steps":{"type":"array","items":{"type":"object"}}},"required":["action"]}}`),
+	json.RawMessage(`{"name":"local_ai","description":"The PC's own model reads files so their text stays out of the chat: ask (answer + which files), summarize, classify (optionally move files into move_to\\<category>; dry_run), models. Reads text, code, Office, PDF and pictures. Check key facts with read. If it returns a GPU-busy WARNING, tell the user and retry with force:true only if they agree.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["ask","summarize","classify","models"]},"paths":{"type":"array","items":{"type":"string"}},"question":{"type":"string"},"categories":{"type":"array","items":{"type":"string"}},"move_to":{"type":"string"},"include":{"type":"string"},"recursive":{"type":"boolean"},"max_files":{"type":"integer"},"detail":{"type":"string","enum":["brief","normal"]},"model":{"type":"string"},"dry_run":{"type":"boolean"},"force":{"type":"boolean"},"wait_seconds":{"type":"integer"},"notify":{"type":"boolean"}},"required":["action"]}}`),
+	json.RawMessage(`{"name":"run","description":"Run a command (cmd or powershell) as a background job; returns exit code, error lines and last lines (tail; 0 = none), full log stays on the PC. No input possible: pass -y flags. wait_for: regex to return early (e.g. a server's ready line); keep_running for servers. elevated:true runs as admin without UAC; destructive admin commands (deleting, registry, services, disks, firewall...) are refused unless confirmed:true, set only after the user said yes to that exact command.","inputSchema":{"type":"object","properties":{"command":{"type":"string"},"elevated":{"type":"boolean"},"confirmed":{"type":"boolean"},"shell":{"type":"string","enum":["cmd","powershell","pwsh"]},"cwd":{"type":"string"},"env":{"type":"object","additionalProperties":{"type":"string"}},"timeout_minutes":{"type":"integer"},"keep_running":{"type":"boolean"},"wait_for":{"type":"string"},"wait_seconds":{"type":"integer"},"tail":{"type":"integer"},"name":{"type":"string"},"notify":{"type":"boolean"}},"required":["command"]}}`),
+	json.RawMessage(`{"name":"system","description":"PC state. info: Windows, CPU, RAM, free space per drive, GPU/driver/CUDA, installed tools. processes (filter), ports, kill (pids, or name + match; system and Claude processes are refused).","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["info","processes","ports","kill"]},"filter":{"type":"string"},"port":{"type":"integer"},"pids":{"type":"array","items":{"type":"integer"}},"name":{"type":"string"},"match":{"type":"string"}}}}`),
+	json.RawMessage(`{"name":"web","description":"Search the web and read pages on the PC, text only (no JavaScript; use browser for that). search: titles, URLs, snippets. find: only lines matching pattern in urls or the top results of query. read: outline and first lines; from_line/lines for more. links (pattern). ask: the local AI answers question from the pages (same GPU rule as local_ai). PDFs read as text. Cached 30 min (fresh:true refetches).","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["search","find","read","links","ask"]},"query":{"type":"string"},"urls":{"type":"array","items":{"type":"string"}},"url":{"type":"string"},"pattern":{"type":"string"},"regex":{"type":"boolean"},"context":{"type":"integer"},"question":{"type":"string"},"pages":{"type":"integer"},"results":{"type":"integer"},"from_line":{"type":"integer"},"lines":{"type":"integer"},"max_chars":{"type":"integer"},"fresh":{"type":"boolean"},"model":{"type":"string"},"force":{"type":"boolean"},"notify":{"type":"boolean"},"wait_seconds":{"type":"integer"}},"required":["action"]}}`),
+	json.RawMessage(`{"name":"window","description":"On-screen text instead of screenshots. list: windows (title, program, pid, size; filter). text: a window's text via UI Automation in screen order, buttons as [Name]; works on Chrome/Electron/Steam; OCR fallback. ocr: a window, or area x,y,w,h. copy: Ctrl+A/Ctrl+C, clipboard restored. do: steps by the names text shows, e.g. [{\"click\":\"Save\"},{\"type\":\"x\",\"into\":\"File name\"},{\"press\":\"enter\"},{\"wait\":1}]; then:\"text\" returns the window after. wait: until the window opens or pattern shows (wait, max 50 s). window: title, program or pid (default: front window). Long text cut at max_chars (4000) and saved to a file; summary:true summarizes locally; changes:true only what changed.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["list","text","ocr","copy","do","wait"]},"window":{"type":"string"},"filter":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},"w":{"type":"integer"},"h":{"type":"integer"},"max_chars":{"type":"integer"},"summary":{"type":"boolean"},"steps":{"type":"array","items":{"type":"object"}},"then":{"type":"string","enum":["text"]},"pattern":{"type":"string"},"wait":{"type":"number"},"changes":{"type":"boolean"}},"required":["action"]}}`),
+	json.RawMessage(`{"name":"browser","description":"Real Chrome with its own ContextSaver profile (stays signed in) for JavaScript or signed-in pages, text only. open/text (url), find (pattern, context), links (pattern), click (target: button/link text), fill (target: field label/placeholder, value), press (value, default Enter), wait (pattern, wait), close. show:true opens it visibly, e.g. for the user to sign in once.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["open","text","find","links","click","fill","press","wait","close"]},"url":{"type":"string"},"target":{"type":"string"},"value":{"type":"string"},"pattern":{"type":"string"},"context":{"type":"integer"},"wait":{"type":"number"},"show":{"type":"boolean"},"max_chars":{"type":"integer"}},"required":["action"]}}`),
+	json.RawMessage(`{"name":"media","description":"Audio and video as text. info: length and streams. transcript: speech to text with local Whisper on the GPU (language optional, timestamps:true for times), cached; long ones finish in the background, call again for the result; same GPU-busy rule as local_ai (force). frames: stills saved to a folder (frames count or every seconds) with their OCR text.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["info","transcript","frames"]},"path":{"type":"string"},"language":{"type":"string"},"timestamps":{"type":"boolean"},"frames":{"type":"integer"},"every":{"type":"number"},"force":{"type":"boolean"},"max_chars":{"type":"integer"}},"required":["action","path"]}}`),
+}
