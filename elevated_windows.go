@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf16"
@@ -205,6 +206,7 @@ func serveElevatedHelper() int {
 	name, _ := syscall.UTF16PtrFromString(elevPipeName)
 	first := true
 	audit("HELPER started (pid %d)", os.Getpid())
+	go helperWatchdog()
 	for {
 		openMode := uint32(0x00000003) // PIPE_ACCESS_DUPLEX
 		if first {
@@ -241,7 +243,43 @@ func secAttrs(sddl string) (*syscall.SecurityAttributes, error) {
 	return &syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), SecurityDescriptor: sd}, nil
 }
 
+// The helper only runs while ContextSaver does (AnythingLLM using a local model):
+// it starts on the first admin command and exits once no ContextSaver tool process
+// is left and no admin command is running.
+var helperActive atomic.Int32
+
+func helperWatchdog() {
+	quiet := 0
+	for {
+		time.Sleep(30 * time.Second)
+		if helperActive.Load() > 0 || contextSaverToolRunning() {
+			quiet = 0
+			continue
+		}
+		if quiet++; quiet >= 2 {
+			audit("HELPER stopped: ContextSaver isn't in use")
+			os.Exit(0)
+		}
+	}
+}
+
+func contextSaverToolRunning() bool {
+	ps, err := procs()
+	if err != nil {
+		return true // can't tell: keep running
+	}
+	for _, p := range ps {
+		c := strings.ToLower(p.cmd)
+		if strings.Contains(c, "contextsaver") && p.pid != os.Getpid() && !strings.Contains(c, " helper") {
+			return true
+		}
+	}
+	return false
+}
+
 func handleElevated(h syscall.Handle) {
+	helperActive.Add(1)
+	defer helperActive.Add(-1)
 	p := &pipeConn{h: h}
 	defer func() {
 		if r := recover(); r != nil {
@@ -384,7 +422,7 @@ func openElevPipe() (syscall.Handle, error) {
 			return 0, fmt.Errorf("couldn't reach the elevated helper: %v", err)
 		}
 		if time.Now().After(deadline) {
-			return 0, errors.New("the elevated helper isn't running and didn't start. It starts at logon; the user can start it with: schtasks /Run /TN \"" + elevTaskName + "\"")
+			return 0, errors.New("the elevated helper isn't running and didn't start. It starts on demand; the user can start it with: schtasks /Run /TN \"" + elevTaskName + "\"")
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
@@ -491,8 +529,8 @@ func consoleInstallHelper() {
 			fmt.Println("Not installed — the permission prompt was declined or failed:", err)
 			return
 		}
-		if pipeUp() {
-			fmt.Println("Elevated helper installed and running. Admin commands from Claude no longer ask for permission.")
+		if taskInstalled() {
+			fmt.Println("Elevated helper installed. It starts by itself when ContextSaver needs admin and stops when it's no longer in use.")
 			fmt.Println("Every elevated command is logged in", auditPath())
 		} else if taskInstalled() {
 			fmt.Println("Helper installed but not answering yet. It starts at your next logon, or now with:")
@@ -538,9 +576,7 @@ func consoleInstallHelper() {
     <Description>ContextSaver elevated helper: runs the admin commands ContextSaver hands it, without a UAC prompt each time. Every command is logged in ` + auditPath() + `</Description>
     <SecurityDescriptor>D:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;GRGX;;;` + sid + `)</SecurityDescriptor>
   </RegistrationInfo>
-  <Triggers>
-    <LogonTrigger><Enabled>true</Enabled><UserId>` + sid + `</UserId></LogonTrigger>
-  </Triggers>
+  <Triggers />
   <Principals>
     <Principal id="Author"><UserId>` + sid + `</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal>
   </Principals>
@@ -581,11 +617,7 @@ func consoleInstallHelper() {
 	for i := 0; i < 20 && pipeUp(); i++ { // let a previous helper exit
 		time.Sleep(250 * time.Millisecond)
 	}
-	quietCmd("schtasks", "/Run", "/TN", elevTaskName).Run()
-	for i := 0; i < 40 && !pipeUp(); i++ {
-		time.Sleep(250 * time.Millisecond)
-	}
-	audit("INSTALLED helper task for %s", sid)
+	audit("INSTALLED helper task for %s (starts only when ContextSaver needs it)", sid)
 }
 
 func consoleUninstallHelper() {

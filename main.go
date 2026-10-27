@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-const appVersion = "1.3.1"
+const appVersion = "1.4.0"
 
 func main() {
 	initApp()
@@ -15,6 +15,10 @@ func main() {
 		return
 	}
 	switch args[0] {
+	case "start":
+		os.Exit(consoleStartLocalAI())
+	case "stop":
+		os.Exit(consoleStopLocalAI())
 	case "model":
 		os.Exit(consoleModel(args[1:]))
 	case "mcp":
