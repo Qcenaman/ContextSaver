@@ -179,6 +179,7 @@ func useModel(name string, waitSecs int) (string, error) {
 	if w := gpuBusyExcept(port); w != "" {
 		return "", errors.New("not switching: " + w + ". Stop that first or switch from the ContextSaver shortcut")
 	}
+	waitNote := waitForAIJobs(60 * time.Second)
 	stopped := stopAllModels(port, false)
 	setAIScript(s)
 	if _, err := startScript(s); err != nil {
@@ -188,19 +189,20 @@ func useModel(name string, waitSecs int) (string, error) {
 	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Second)
 		if len(servedModels(host, port)) > 0 && !serverLoading(host, port) {
-			return name + " loaded on port " + fmt.Sprint(port) + stoppedNote(stopped), nil
+			return name + " loaded on port " + fmt.Sprint(port) + stoppedNote(stopped) + waitNote, nil
 		}
 	}
-	return name + " is loading on port " + fmt.Sprint(port) + stoppedNote(stopped) + "; check with model{action:list}", nil
+	return name + " is loading on port " + fmt.Sprint(port) + stoppedNote(stopped) + waitNote + "; check with model{action:list}", nil
 }
 
 func stopModel() string {
 	_, port := scriptAddr(firstScript())
+	waitNote := waitForAIJobs(60 * time.Second)
 	stopped := stopAllModels(port, false)
 	if len(stopped) == 0 {
 		return "nothing loaded"
 	}
-	return "stopped " + strings.Join(stopped, ", ") + "; VRAM freed"
+	return "stopped " + strings.Join(stopped, ", ") + "; VRAM freed" + waitNote
 }
 
 func setAIScript(s string) {
@@ -433,4 +435,62 @@ func uniq(xs []string) []string {
 		}
 	}
 	return out
+}
+
+// AI jobs of TokenSaver (Claude's tool) and ContextSaver read through the loaded model.
+// Switching mid-job would make them fail, so a switch waits for them first.
+func aiJobDirs() []string {
+	dirs := []string{jobsDir()}
+	if isWin {
+		dirs = append(dirs, `D:\Claude Apps\TokenSaver\data\jobs`)
+	}
+	return dirs
+}
+
+// runningAIJobs names AI jobs that are running now (kind ai, or web for web ask).
+func runningAIJobs() []string {
+	var out []string
+	for _, d := range aiJobDirs() {
+		es, err := os.ReadDir(d)
+		if err != nil {
+			continue
+		}
+		// newest jobs last; only recent ones can still be running
+		for i := len(es) - 1; i >= 0 && i >= len(es)-40; i-- {
+			b, err := os.ReadFile(filepath.Join(d, es[i].Name(), "state.json"))
+			if err != nil {
+				continue
+			}
+			var st struct {
+				Name    string    `json:"name"`
+				Kind    string    `json:"kind"`
+				Status  string    `json:"status"`
+				Updated time.Time `json:"updated"`
+			}
+			if json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &st) != nil {
+				continue
+			}
+			if st.Status == "running" && (st.Kind == "ai" || st.Kind == "web") && time.Since(st.Updated) < 2*time.Minute {
+				out = append(out, st.Name)
+			}
+		}
+	}
+	return out
+}
+
+// waitForAIJobs waits up to max for running AI jobs to finish. It returns a note
+// for the result when it waited or gave up waiting.
+func waitForAIJobs(max time.Duration) string {
+	jobs := runningAIJobs()
+	if len(jobs) == 0 {
+		return ""
+	}
+	start := time.Now()
+	for time.Since(start) < max {
+		time.Sleep(2 * time.Second)
+		if jobs = runningAIJobs(); len(jobs) == 0 {
+			return fmt.Sprintf("; waited %ds for an AI job to finish first", int(time.Since(start).Seconds()))
+		}
+	}
+	return "; switched anyway after waiting " + max.String() + " for " + strings.Join(jobs, ", ") + " (it may fail)"
 }
