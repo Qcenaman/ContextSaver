@@ -18,7 +18,8 @@ type rpcReq struct {
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
-var localMode bool
+// ContextSaver serves AnythingLLM's local models: one small tool, confirmations.
+const localMode = true
 
 const localInstructions = `Use the pc tool for anything on this PC; help{c} shows a command's args.`
 
@@ -88,11 +89,7 @@ func handleRPC(req rpcReq) map[string]any {
 	case "ping":
 		resp["result"] = map[string]any{}
 	case "tools/list":
-		if localMode {
-			resp["result"] = map[string]any{"tools": []json.RawMessage{compactTool}}
-		} else {
-			resp["result"] = map[string]any{"tools": append(append([]json.RawMessage{}, toolDefs...), compactTool)}
-		}
+		resp["result"] = map[string]any{"tools": []json.RawMessage{compactTool}}
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`

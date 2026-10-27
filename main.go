@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-const appVersion = "1.3.0"
+const appVersion = "1.3.1"
 
 func main() {
 	initApp()
@@ -18,14 +18,6 @@ func main() {
 	case "model":
 		os.Exit(consoleModel(args[1:]))
 	case "mcp":
-		// --local: AnythingLLM's local models (one small tool, confirmations).
-		// Without it: Claude mode, every tool with its full description.
-		localMode = os.Getenv("CONTEXTSAVER_LOCAL") == "1"
-		for _, a := range args[1:] {
-			if a == "--local" {
-				localMode = true
-			}
-		}
 		serveMCP(os.Stdin, os.Stdout)
 	case "run":
 		if len(args) < 2 {
