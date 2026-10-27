@@ -171,8 +171,13 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		return "", nil, fmt.Errorf("unknown c %q. Commands: find ls read write edit run web ai sys model more help files job saved browser window media", c)
 	}
 	fixArgs(name, a)
+	note, _ := a["_note"].(string)
+	delete(a, "_note")
 	b, _ := json.Marshal(a)
 	out, imgs, err := callTool(name, b)
+	if err == nil && note != "" {
+		out = note + out
+	}
 	if err == nil && name == "run" {
 		out = trimRunOut(out)
 	}
@@ -268,6 +273,11 @@ func fixArgs(tool string, a map[string]any) {
 			a["max_chars"] = maxOut()
 		}
 	case "window", "browser":
+		if tool == "window" && strings.EqualFold(str(a, "action"), "screenshot") && a["question"] == nil && !localVision() {
+			// the loaded model can't see pictures: give it the window's text instead
+			a["action"] = "text"
+			a["_note"] = "(the loaded model can't read images, so here is the window's text)\n"
+		}
 		if _, ok := a["max_chars"]; !ok {
 			a["max_chars"] = maxOut()
 		}

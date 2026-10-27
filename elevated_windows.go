@@ -295,7 +295,7 @@ func handleElevated(h syscall.Handle) {
 	var cpid uint32
 	procGetNamedPipeClientProcessId.Call(uintptr(h), uintptr(unsafe.Pointer(&cpid)))
 	client := processPath(cpid)
-	if client == "" || (!samePath(client, installPath()) && !strings.HasSuffix(strings.ToLower(client), `\contextsaver.exe.old`)) {
+	if client == "" || !helperClientOK(client) {
 		audit("REJECTED connection from pid %d (%s) — only %s may use the helper", cpid, client, installPath())
 		return
 	}
@@ -436,7 +436,7 @@ func startElevated(req elevRequest, out io.Writer) (*elevProc, error) {
 	p := &pipeConn{h: h}
 	var spid uint32
 	procGetNamedPipeServerProcessId.Call(uintptr(h), uintptr(unsafe.Pointer(&spid)))
-	if sp := processPath(spid); sp != "" && !samePath(sp, installPath()) && !strings.HasSuffix(strings.ToLower(sp), `\contextsaver.exe.old`) {
+	if sp := processPath(spid); sp != "" && !helperClientOK(sp) {
 		p.close()
 		// Self-heal: a stale ContextSaver helper left at an old install path (after the
 		// program was updated or moved) is re-pointed at the current install once, then
@@ -450,7 +450,7 @@ func startElevated(req elevRequest, out io.Writer) (*elevProc, error) {
 		p = &pipeConn{h: h}
 		spid = 0
 		procGetNamedPipeServerProcessId.Call(uintptr(h), uintptr(unsafe.Pointer(&spid)))
-		if sp := processPath(spid); sp != "" && !samePath(sp, installPath()) && !strings.HasSuffix(strings.ToLower(sp), `\contextsaver.exe.old`) {
+		if sp := processPath(spid); sp != "" && !helperClientOK(sp) {
 			p.close()
 			return nil, fmt.Errorf("refused: the elevated pipe is served by %s, not ContextSaver", sp)
 		}
@@ -649,16 +649,13 @@ func consoleUninstallHelper() {
 
 // refreshHelper points an installed helper at the newly installed program (one UAC prompt).
 func refreshHelper() {
-	if isElevated() || !taskInstalled() {
+	if !taskInstalled() {
 		return
 	}
+	// The task always runs the installed program and only starts on demand, so a
+	// running helper just has to end: the next admin command starts the new version.
 	if pipeUp() {
-		// The running helper keeps working; the task starts this version at the next sign-in.
-		return
-	}
-	fmt.Println("\nUpdating the elevated helper to this version — Windows will ask once for permission...")
-	if err := elevateSelf("install-helper"); err != nil {
-		fmt.Println("Helper not updated (prompt declined?). Update it later from the menu with h.")
+		quietCmd("schtasks", "/End", "/TN", elevTaskName).Run()
 	}
 }
 
@@ -689,4 +686,18 @@ func moveTree(src, dst string) error {
 		err = fmt.Errorf("robocopy failed")
 	}
 	return err
+}
+
+// helperClientOK: the installed program, or an older ContextSaver still running after
+// an update (install renames it to contextsaver.exe.old, later moved into old\).
+func helperClientOK(client string) bool {
+	if samePath(client, installPath()) {
+		return true
+	}
+	base := strings.ToLower(filepath.Base(client))
+	if !strings.HasPrefix(base, "contextsaver.exe.old") {
+		return false
+	}
+	root := strings.ToLower(filepath.Clean(appRoot())) + `\`
+	return strings.HasPrefix(strings.ToLower(filepath.Clean(client)), root)
 }

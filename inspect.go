@@ -223,6 +223,7 @@ type findArgs struct {
 	Recursive     *bool   `json:"recursive"`
 	Limit         int     `json:"limit"`
 	All           bool    `json:"all"`
+	Lines         int     `json:"lines"`
 }
 
 func toolFind(raw json.RawMessage) (string, error) {
@@ -272,6 +273,11 @@ func toolFind(raw json.RawMessage) (string, error) {
 		limit = 50
 	}
 	limit = min(limit, 500)
+	perFile := a.Lines
+	if perFile <= 0 {
+		perFile = 3
+	}
+	perFile = min(perFile, 50)
 	deadline := time.Now().Add(40 * time.Second)
 	var roots []string
 	for _, raw := range a.Path {
@@ -333,12 +339,15 @@ func toolFind(raw json.RawMessage) (string, error) {
 			line := fmt.Sprintf("%s · %s · %s", q, hb(fi.Size()), fi.ModTime().Format("2006-01-02"))
 			if lineMatch != nil {
 				scanned.Add(1)
-				hits := grepFile(q, fi, lineMatch, 2)
-				if len(hits) == 0 {
+				hits, total := grepFile(q, fi, lineMatch, perFile)
+				if total == 0 {
 					continue
 				}
 				for _, h := range hits {
 					line += "\n   " + h
+				}
+				if more := total - len(hits); more > 0 {
+					line += fmt.Sprintf("\n   (+%d more matching lines; raise lines, or read mode grep for all)", more)
 				}
 			}
 			mu.Lock()
@@ -374,61 +383,60 @@ func toolFind(raw json.RawMessage) (string, error) {
 	return b.String(), nil
 }
 
-func grepFile(p string, fi fs.FileInfo, match func(string) bool, maxHits int) []string {
+func grepFile(p string, fi fs.FileInfo, match func(string) bool, maxHits int) ([]string, int) {
 	var hits []string
-	try := func(n int, l string) bool {
+	total := 0
+	try := func(n int, l string) {
 		if match(l) {
-			hits = append(hits, fmt.Sprintf("L%d: %s", n, clip(strings.TrimSpace(l), 160)))
+			total++
+			if len(hits) < maxHits {
+				hits = append(hits, fmt.Sprintf("L%d: %s", n, clip(strings.TrimSpace(l), 160)))
+			}
 		}
-		return len(hits) >= maxHits
 	}
 	if isDocExt(filepath.Ext(p)) || fi.Size() <= 20<<20 {
 		text, err := extractText(p, 20<<20)
 		if err != nil {
-			return nil
+			return nil, 0
 		}
 		lines := strings.Split(text, "\n")
 		if strings.EqualFold(filepath.Ext(p), ".pdf") {
 			pages := pageOfLines(lines)
 			for i, l := range lines {
 				if !strings.HasPrefix(l, "[page ") && match(l) {
-					hits = append(hits, fmt.Sprintf("L%d (p%d): %s", i+1, pages[i], clip(strings.TrimSpace(l), 160)))
-					if len(hits) >= maxHits {
-						break
+					total++
+					if len(hits) < maxHits {
+						hits = append(hits, fmt.Sprintf("L%d (p%d): %s", i+1, pages[i], clip(strings.TrimSpace(l), 160)))
 					}
 				}
 			}
-			return hits
+			return hits, total
 		}
 		for i, l := range lines {
-			if try(i+1, l) {
-				break
-			}
+			try(i+1, l)
 		}
-		return hits
+		return hits, total
 	}
 	if fi.Size() > 200<<20 {
-		return nil
+		return nil, 0
 	}
 	fh, err := os.Open(p)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	defer fh.Close()
 	head := make([]byte, 8000)
 	n, _ := io.ReadFull(fh, head)
 	if strings.IndexByte(string(head[:n]), 0) >= 0 {
-		return nil
+		return nil, 0
 	}
 	fh.Seek(0, io.SeekStart)
 	sc := bufio.NewScanner(fh)
 	sc.Buffer(make([]byte, 1<<20), 8<<20)
 	for i := 1; sc.Scan(); i++ {
-		if try(i, sc.Text()) {
-			break
-		}
+		try(i, sc.Text())
 	}
-	return hits
+	return hits, total
 }
 
 // ---------- read ----------

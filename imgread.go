@@ -12,6 +12,7 @@ import (
 	_ "image/gif"
 	"image/jpeg"
 	_ "image/png"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -166,6 +167,10 @@ func encodeJPEG(img image.Image) []byte {
 	var out bytes.Buffer
 	jpeg.Encode(&out, img, &jpeg.Options{Quality: 85})
 	return out.Bytes()
+}
+
+func jpegEncodeQ(w io.Writer, img image.Image, q int) error {
+	return jpeg.Encode(w, img, &jpeg.Options{Quality: q})
 }
 
 type preview struct {

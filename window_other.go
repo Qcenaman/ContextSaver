@@ -9,3 +9,6 @@ func copyWindowText(w winInfo) (string, error) { return "", errNoInput }
 func focusWindow(w winInfo) error              { return errNoInput }
 
 func pasteText(s string) error { return errNoInput }
+
+func clipText() (string, bool)   { return "", false }
+func setClipText(s string) error { return errNoInput }

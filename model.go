@@ -505,3 +505,14 @@ func waitForAIJobs(max time.Duration) string {
 	}
 	return "; switched anyway after waiting " + max.String() + " for " + strings.Join(jobs, ", ") + " (it may fail)"
 }
+
+// localVision reports whether the loaded model accepts pictures (llama.cpp /props).
+func localVision() bool {
+	host, port := scriptAddr(firstScript())
+	c := &aiClient{kind: "openai", base: fmt.Sprintf("http://%s:%d", host, port), hc: &http.Client{Timeout: 3 * time.Second}}
+	if len(servedModels(host, port)) == 0 {
+		return false
+	}
+	c.loadCtx()
+	return c.vision
+}

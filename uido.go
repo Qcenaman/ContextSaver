@@ -56,11 +56,22 @@ try {
 `
 
 type uiStep struct {
-	Click string  `json:"click"`
-	Type  string  `json:"type"`
-	Into  string  `json:"into"`
-	Press string  `json:"press"`
-	Wait  float64 `json:"wait"`
+	Click     string  `json:"click"`
+	Type      string  `json:"type"`
+	Into      string  `json:"into"`
+	Press     string  `json:"press"`
+	Wait      float64 `json:"wait"`
+	ClickText string  `json:"click_text"`
+	Nth       int     `json:"nth"`
+	ClickAt   []int   `json:"click_at"`
+	Button    string  `json:"button"`
+	Scroll    int     `json:"scroll"`
+	At        []int   `json:"at"`
+	Drag      []int   `json:"drag"`
+	Move      []int   `json:"move"`
+	Hold      string  `json:"hold"`
+	Secs      float64 `json:"secs"`
+	Screen    bool    `json:"screen"`
 }
 
 func uiaDo(w winInfo, op, name, value string) (string, error) {
@@ -125,28 +136,32 @@ func windowDo(w winInfo, raw json.RawMessage) (string, error) {
 	for i, s := range steps {
 		var r string
 		var err error
-		switch {
-		case s.Click != "":
-			r, err = uiaDo(w, "click", s.Click, "")
-			r = s.Click + ": " + r
-		case s.Type != "" && s.Into != "":
-			r, err = uiaDo(w, "set", s.Into, s.Type)
-			r = s.Into + ": " + r
-		case s.Type != "":
-			if err = focusWindow(w); err == nil {
-				err = pasteText(s.Type)
-				r = "typed"
+		if sr, ok, serr := screenStep(w, s); ok {
+			r, err = sr, serr
+		} else {
+			switch {
+			case s.Click != "":
+				r, err = uiaDo(w, "click", s.Click, "")
+				r = s.Click + ": " + r
+			case s.Type != "" && s.Into != "":
+				r, err = uiaDo(w, "set", s.Into, s.Type)
+				r = s.Into + ": " + r
+			case s.Type != "":
+				if err = focusWindow(w); err == nil {
+					err = pasteText(s.Type)
+					r = "typed"
+				}
+			case s.Press != "":
+				if err = focusWindow(w); err == nil {
+					err = pressCombo(s.Press)
+					r = "pressed " + s.Press
+				}
+			case s.Wait > 0:
+				time.Sleep(time.Duration(min(s.Wait, 30) * float64(time.Second)))
+				r = fmt.Sprintf("waited %gs", s.Wait)
+			default:
+				err = errors.New("empty step")
 			}
-		case s.Press != "":
-			if err = focusWindow(w); err == nil {
-				err = pressCombo(s.Press)
-				r = "pressed " + s.Press
-			}
-		case s.Wait > 0:
-			time.Sleep(time.Duration(min(s.Wait, 30) * float64(time.Second)))
-			r = fmt.Sprintf("waited %gs", s.Wait)
-		default:
-			err = errors.New("empty step")
 		}
 		if err != nil {
 			log = append(log, fmt.Sprintf("%d. failed: %v", i+1, err))
