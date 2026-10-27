@@ -18,9 +18,9 @@ import (
 // fetched on demand with c=help, and every result is capped; the rest is kept on
 // disk and paged with c=more.
 
-const compactDesc = `Full control of the user's Windows PC: open apps, files and sites, run any command (admin too), read/write/edit files, make and edit Word/Excel/PowerPoint/PDF, search, see window text, click buttons, use Chrome. You CAN do these; never say you can't, call this tool. c=command, a=args. Paths absolute. Cut output: more{id}.
-open{target}: app, file, folder or URL. find{path[],name,text} ls{path} read{path,mode:head|lines|grep|text,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command,shell:cmd|powershell} web{action:search|read,query,url} ai{action:ask|summarize,paths[],question} office{action:create|edit|read|convert,path,content} sys{action:info|processes|ports} model{action:list|use|stop,name} (loading one stops all other local models) more{id} help{c}
-help{c} lists all args; more commands: files job saved browser window media`
+const compactDesc = `Controls the user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths.
+open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action:create|edit|read|convert,path,content} rag{query|text} sys{action} model{name|action:list|stop} more{id}
+Also: files job saved browser window media. help{c} = all args.`
 
 var compactTool = json.RawMessage(`{"name":"pc","description":` + strconv.Quote(compactDesc) + `,"inputSchema":{"type":"object","properties":{"c":{"type":"string"},"a":{"type":"object"}},"required":["c"]}}`)
 
@@ -34,6 +34,7 @@ var compactAlias = map[string]string{
 	"sys": "system", "system": "system",
 	"ai": "local_ai", "local_ai": "local_ai",
 	"office": "office", "doc": "office", "word": "office", "excel": "office", "xlsx": "office", "docx": "office", "pptx": "office", "pdf": "office", "powerpoint": "office",
+	"rag": "rag", "memory": "rag", "notes": "rag",
 	"job": "job", "jobs": "job", "files": "run_job", "run_job": "run_job", "saved": "saved",
 }
 
@@ -80,6 +81,18 @@ func callCompact(raw json.RawMessage) (string, []toolImage, error) {
 	if c == "" {
 		return "", nil, errors.New("give c (a command). " + firstLine(compactDesc))
 	}
+	if localMode {
+		confirm := str(args, "confirm")
+		if confirm == "" {
+			confirm = jsonStr(top["confirm"])
+		}
+		delete(args, "confirm")
+		if what := riskyAction(c, args); what != "" {
+			if !useConfirm(confirm, c, args) {
+				return "CONFIRM " + newConfirm(c, args) + ": " + what + "; ask the user, then call again with the same args plus confirm:<token>", nil, nil
+			}
+		}
+	}
 	out, imgs, err := compactDispatch(c, args)
 	if err != nil {
 		return "", nil, errors.New(clip1(err.Error(), 600))
@@ -96,6 +109,12 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		return compactHelp(str(a, "c", "cmd", "command")), nil, nil
 	case "more", "next":
 		return moreOut(str(a, "id"), intArg(a, "from")), nil, nil
+	case "remember":
+		a["action"] = "remember"
+		fixArgs("rag", a)
+		b, _ := json.Marshal(a)
+		out, err := toolRag(b)
+		return out, nil, err
 	case "load", "switch", "use":
 		a["action"] = "use"
 		if str(a, "name", "model") == "" {
@@ -265,6 +284,21 @@ func fixArgs(tool string, a map[string]any) {
 		}
 		if _, ok := a["max_chars"]; !ok {
 			a["max_chars"] = maxOut()
+		}
+	case "rag":
+		rename("query", "q", "search")
+		rename("text", "note", "content")
+		listify("ids")
+		listify("paths")
+		if _, ok := a["action"]; !ok {
+			switch {
+			case a["query"] != nil:
+				a["action"] = "search"
+			case a["text"] != nil:
+				a["action"] = "remember"
+			default:
+				a["action"] = "status"
+			}
 		}
 	case "system":
 		if _, ok := a["action"]; !ok {

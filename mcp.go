@@ -18,7 +18,18 @@ type rpcReq struct {
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
-const serverInstructions = `Use the pc tool for anything on this PC; help{c} shows a command's args.`
+var localMode bool
+
+const localInstructions = `Use the pc tool for anything on this PC; help{c} shows a command's args.`
+
+const serverInstructions = `ContextSaver works on this Windows PC and returns short results, so use it instead of built-in file, web-fetch, browser or computer-use tools whenever it can do the job. scan/find to look around; read for just the part you need (Office, PDF, and images or scans via OCR; image mode for a small picture); run_job for file operations on any number of files; run for commands (exit code and error lines only); system for PC state; web for search and page facts; browser for JavaScript or signed-in pages; media for audio/video as text; office to create, edit, read or convert Word, Excel, PowerPoint and PDF files; rag to search the user's files by meaning and keep or recall memory notes across chats; window to read on-screen text instead of screenshots; local_ai to have the PC's own model read, describe or sort many files and images; pc for the same in one small tool, and model to switch the local chat model. Dry-run deletes, renames and overwrites.`
+
+func instructions() string {
+	if localMode {
+		return localInstructions
+	}
+	return serverInstructions
+}
 
 func serveMCP(in io.Reader, out io.Writer) {
 	resumeNotifier()
@@ -53,6 +64,7 @@ func serveMCP(in io.Reader, out io.Writer) {
 	}
 	wg.Wait()
 	waitAllJobs()
+	embedSrv.shutdown()
 }
 
 func handleRPC(req rpcReq) map[string]any {
@@ -71,12 +83,16 @@ func handleRPC(req rpcReq) map[string]any {
 			"protocolVersion": v,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "contextsaver", "version": appVersion},
-			"instructions":    serverInstructions,
+			"instructions":    instructions(),
 		}
 	case "ping":
 		resp["result"] = map[string]any{}
 	case "tools/list":
-		resp["result"] = map[string]any{"tools": []json.RawMessage{compactTool}}
+		if localMode {
+			resp["result"] = map[string]any{"tools": []json.RawMessage{compactTool}}
+		} else {
+			resp["result"] = map[string]any{"tools": append(append([]json.RawMessage{}, toolDefs...), compactTool)}
+		}
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -147,6 +163,8 @@ func callTool(name string, args json.RawMessage) (out string, imgs []toolImage, 
 		out, err = toolMedia(args)
 	case "office":
 		out, err = toolOffice(args)
+	case "rag":
+		out, err = toolRag(args)
 	default:
 		err = fmt.Errorf("unknown tool %q", name)
 	}
@@ -365,4 +383,5 @@ var toolDefs = []json.RawMessage{
 	json.RawMessage(`{"name":"browser","description":"Real Chrome with its own ContextSaver profile (stays signed in) for JavaScript or signed-in pages, text only. open/text (url), find (pattern, context), links (pattern), click (target: button/link text), fill (target: field label/placeholder, value), press (value, default Enter), wait (pattern, wait), close. show:true opens it visibly, e.g. for the user to sign in once.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["open","text","find","links","click","fill","press","wait","close"]},"url":{"type":"string"},"target":{"type":"string"},"value":{"type":"string"},"pattern":{"type":"string"},"context":{"type":"integer"},"wait":{"type":"number"},"show":{"type":"boolean"},"max_chars":{"type":"integer"}},"required":["action"]}}`),
 	json.RawMessage(`{"name":"media","description":"Audio and video as text. info: length and streams. transcript: speech to text with local Whisper on the GPU (language optional, timestamps:true for times), cached; long ones finish in the background, call again for the result; same GPU-busy rule as local_ai (force). frames: stills saved to a folder (frames count or every seconds) with their OCR text.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["info","transcript","frames"]},"path":{"type":"string"},"language":{"type":"string"},"timestamps":{"type":"boolean"},"frames":{"type":"integer"},"every":{"type":"number"},"force":{"type":"boolean"},"max_chars":{"type":"integer"}},"required":["action","path"]}}`),
 	json.RawMessage(`{"name":"office","description":"Word, Excel, PowerPoint, PDF on the PC. create: .docx/.pdf from Markdown content (# headings, - lists, 1. lists, | tables |, **bold**, *italic*, ` + "`code`" + `, [link](url), ![](picture), --- page break); .pptx: a slide per --- or #/## heading (first heading = title, then bullets, tables, pictures); .xlsx: sheets [{name, rows}] (numbers stay numbers, \"=SUM(A1:A3)\" formulas, 2026-01-31 dates) or CSV content; .pdf also merges from (\"a.pdf\", \"b.pdf:2-5\", pictures). edit (old copy kept in backups; to = save as): docx: replace [{find,with}], delete_paragraphs, content appended or insert_after text; pptx: replace, delete_slides \"2,4\", content = new slides; xlsx: cells {\"B2\":5,\"Sheet2!C1\":\"=B2*2\"}, append_rows (sheet), sheets adds, replace; pdf: pages keeps/reorders \"3,1-2\", rotate 90 and stamp text ({n} {total}; stamp_at bottom|top|center watermark|top-right...) on apply_to pages, from appends files, content appends pages, split:true one file per page or per pages group. read: Markdown-like outline (docx/pptx), cells with A1 refs and formulas (xlsx), PDF text by page (pages); .doc/.xls/.ppt/.rtf read via Office. convert: to another format through installed Office (to: \".pdf\" or a file name): doc/docx/rtf/pdf<->docx/pdf/doc/rtf/odt/html, xls/xlsx/csv->xlsx/xls/csv/pdf/ods, ppt/pptx->pptx/ppt/pdf/odp.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["create","edit","read","convert"]},"path":{"type":"string"},"to":{"type":"string"},"content":{"type":"string"},"sheets":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"rows":{"type":"array","items":{"type":"array"}}}}},"sheet":{"type":"string"},"cells":{"type":"object"},"append_rows":{"type":"array","items":{"type":"array"}},"col_widths":{"type":"object","additionalProperties":{"type":"number"}},"replace":{"type":"array","items":{"type":"object","properties":{"find":{"type":"string"},"with":{"type":"string"}},"required":["find"]}},"insert_after":{"type":"string"},"delete_paragraphs":{"type":"array","items":{"type":"string"}},"delete_slides":{"type":"string"},"from":{"type":"array","items":{"type":"string"}},"pages":{"type":"string"},"apply_to":{"type":"string"},"rotate":{"type":"integer"},"stamp":{"type":"string"},"stamp_at":{"type":"string"},"stamp_size":{"type":"number"},"split":{"type":"boolean"},"landscape":{"type":"boolean"},"overwrite":{"type":"boolean"},"max_chars":{"type":"integer"}},"required":["action","path"]}}`),
+	json.RawMessage(`{"name":"rag","description":"Meaning-based search over the PC's files plus memory notes across chats. search: query → best passages (path, line/page, text); under (folder), ext (\"pdf,docx\"), scope all|files|notes, tag, k (8). remember: text (+tags) as a note: decisions, facts, summaries worth recalling later. notes: list (tag, limit). forget: ids (archived, not deleted). update: (re)index changed files only when asked; paths limits it to folders; dry_run shows what it would cover; runs in the background (notify). Uses the GPU when there is room; the CPU by itself while ComfyUI or training runs (force:true keeps the GPU). status. config: roots, types (only these extensions, e.g. [\"pdf\",\"docx\"]; [] = all), exclude (path, folder name, or *.ext; \"+name\" re-includes a default-skipped name), include (undo exclude).","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["search","remember","notes","forget","update","status","config"]},"query":{"type":"string"},"k":{"type":"integer"},"under":{"type":"string"},"ext":{"type":"string"},"scope":{"type":"string","enum":["all","files","notes"]},"tag":{"type":"string"},"text":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"ids":{"type":"array","items":{"type":"string"}},"limit":{"type":"integer"},"paths":{"type":"array","items":{"type":"string"}},"roots":{"type":"array","items":{"type":"string"}},"exclude":{"type":"array","items":{"type":"string"}},"include":{"type":"array","items":{"type":"string"}},"types":{"type":"array","items":{"type":"string"}},"dry_run":{"type":"boolean"},"force":{"type":"boolean"},"cpu":{"type":"boolean"},"notify":{"type":"boolean"},"wait_seconds":{"type":"integer"}},"required":["action"]}}`),
 }

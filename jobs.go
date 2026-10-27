@@ -25,6 +25,7 @@ type JobSpec struct {
 	Web    *WebRequest `json:"web,omitempty"`
 	Source string      `json:"source,omitempty"`
 	Run    *runArgs    `json:"run,omitempty"`
+	Rag    *ragRequest `json:"rag,omitempty"`
 }
 
 type StepResult struct {
@@ -320,6 +321,8 @@ func (j *Job) run() {
 		fatal = runWebAsk(j)
 	case "run":
 		fatal = runCommand(j)
+	case "rag":
+		fatal = runRagUpdate(j)
 	default:
 		fatal = fmt.Errorf("unknown job kind %q", j.Spec.Kind)
 	}
@@ -579,7 +582,7 @@ func formatState(s *JobState) string {
 	}
 	if s.Status == "running" {
 		b.WriteString("\nStill running; check again with job status id=" + s.ID)
-	} else if !s.DryRun && s.Kind != "ai" && s.Kind != "web" && exists(filepath.Join(jobsDir(), s.ID, "log.tsv")) {
+	} else if !s.DryRun && s.Kind != "ai" && s.Kind != "web" && s.Kind != "rag" && exists(filepath.Join(jobsDir(), s.ID, "log.tsv")) {
 		b.WriteString("\nLog: " + filepath.Join(jobsDir(), s.ID, "log.tsv"))
 	}
 	if s.Status == "interrupted" {

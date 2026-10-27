@@ -230,7 +230,7 @@ func consoleInstall() {
 			// ContextSaver replaces these, whose tool lists fill a local model's context.
 			delete(s, "tokensaver")
 			delete(s, "windows-mcp")
-			s["contextsaver"] = map[string]any{"command": target, "args": []string{"mcp"}}
+			s["contextsaver"] = map[string]any{"command": target, "args": []string{"mcp", "--local"}}
 		})
 		if err != nil {
 			fmt.Println("Couldn't update", p+":", err)
@@ -299,7 +299,7 @@ func configHasEntry(path, target string) bool {
 		return false
 	}
 	e, ok := m.MCPServers["contextsaver"]
-	return ok && samePath(e.Command, target) && len(e.Args) == 1 && e.Args[0] == "mcp"
+	return ok && samePath(e.Command, target) && len(e.Args) == 2 && e.Args[0] == "mcp" && e.Args[1] == "--local"
 }
 
 // migrateOldInstall moves everything older versions left outside appRoot into it:

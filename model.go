@@ -448,9 +448,20 @@ func aiJobDirs() []string {
 }
 
 // runningAIJobs names AI jobs that are running now (kind ai, or web for web ask).
-func runningAIJobs() []string {
+func runningAIJobs() []string { return runningJobsOfKind(aiJobDirs(), "ai", "web") }
+
+// otherJobDirs: TokenSaver's jobs folder.
+func otherJobDirs() []string {
+	if isWin {
+		return []string{`D:\Claude Apps\TokenSaver\data\jobs`}
+	}
+	return nil
+}
+
+// runningJobsOfKind names jobs of these kinds that are running now in dirs.
+func runningJobsOfKind(dirs []string, kinds ...string) []string {
 	var out []string
-	for _, d := range aiJobDirs() {
+	for _, d := range dirs {
 		es, err := os.ReadDir(d)
 		if err != nil {
 			continue
@@ -470,7 +481,7 @@ func runningAIJobs() []string {
 			if json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &st) != nil {
 				continue
 			}
-			if st.Status == "running" && (st.Kind == "ai" || st.Kind == "web") && time.Since(st.Updated) < 2*time.Minute {
+			if st.Status == "running" && containsFold(kinds, st.Kind) && time.Since(st.Updated) < 2*time.Minute {
 				out = append(out, st.Name)
 			}
 		}
