@@ -510,6 +510,12 @@ func openAI(j *Job, want string) (*aiClient, func(), error) {
 		if c.healthy() {
 			return finish(noop)
 		}
+		// LM Studio has a model loaded: use it rather than starting a second model.
+		if id := lmsLoaded(); id != "" {
+			lc := &aiClient{kind: "openai", base: lmsBase, hc: hc, model: id, noThink: true}
+			lc.loadCtx()
+			return lc, noop, nil
+		}
 		j.setCurrent("starting the local AI model…")
 		p, err := startScript(cfg.AIScript)
 		if err != nil {

@@ -69,6 +69,17 @@ func TestUnknownCListsEveryCommand(t *testing.T) {
 	}
 }
 
+func TestLMStudioNames(t *testing.T) {
+	for _, n := range []string{"qwen", "gemma", "oss", "oss-free"} {
+		if lmsNames[n] == "" {
+			t.Errorf("no LM Studio key for %s", n)
+		}
+	}
+	if !needsFullGPU("gemma", lmsNames["gemma"]) || needsFullGPU("oss", lmsNames["oss"]) {
+		t.Fatal("VRAM check flags wrong models")
+	}
+}
+
 func TestNeedsFullGPU(t *testing.T) {
 	if !needsFullGPU("gemma", `D:\llama.cpp\start-gemma-4-31b.bat`) || !needsFullGPU("x", `D:\llama.cpp\start-qwen3.6-27b.bat`) {
 		t.Fatal("qwen/gemma not flagged")

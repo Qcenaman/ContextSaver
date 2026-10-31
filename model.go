@@ -144,6 +144,9 @@ func toolModel(a map[string]any) (string, error) {
 }
 
 func modelStatus() string {
+	if lmsMode() {
+		return lmsStatus()
+	}
 	cur, st := currentModel()
 	var b strings.Builder
 	for _, n := range modelNames() {
@@ -166,6 +169,9 @@ func modelStatus() string {
 }
 
 func useModel(name string, waitSecs int) (string, error) {
+	if lmsMode() {
+		return lmsUse(name)
+	}
 	s, ok := models()[name]
 	if !ok {
 		return "", fmt.Errorf("unknown model %q; have: %s", name, strings.Join(modelNames(), ", "))
