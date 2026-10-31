@@ -98,6 +98,8 @@ func riskyAction(c string, a map[string]any) string {
 		return "start program " + t + " " + str(a, "args")
 	case "remember", "load", "switch", "use", "help", "?", "more", "next", "model", "models":
 		return ""
+	case "phone", "android", "install_app", "apk", "mobile":
+		return phoneRisky(a)
 	}
 	switch tool {
 	case "run":

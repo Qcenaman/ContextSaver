@@ -21,16 +21,16 @@ import (
 const compactDesc = `Controls the user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths.
 open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action,path} rag{query|text} sys{action} model{name} more{id}
 git{action:status|commit|push|ci,path,message} check{path} lints, check{path,action:build} builds+tests (not run); plan{set|done|show}
-Also: files job saved browser window media. help{c} = all args.`
+Also: files job saved browser window media phone. help{c} = all args.`
 
 // clineDesc: with "mcp --for cline" only what Cline lacks is advertised (Cline has its
 // own read/write/edit/run/find/browser); every command still works.
 const clineDesc = `The user's PC beyond Cline's own tools; you CAN act. c=command, a=args, absolute paths.
 git{action:status|diff|log|commit|push|pull|clone|ci,path,message} check{path,action:check|build} after every code change
 rag{query|text} office{action,path} web{query|url} ai{paths[],question} model{name}
-Also: window media sys saved job more. help{c} = all args.`
+Also: window media sys saved job phone more. help{c} = all args.`
 
-var clineCommands = []string{"git", "check", "rag", "office", "web", "ai", "model", "window", "media", "sys", "saved", "job", "more", "help"}
+var clineCommands = []string{"git", "check", "rag", "office", "web", "ai", "model", "window", "media", "sys", "saved", "job", "phone", "more", "help"}
 
 // The profile in use (set from "mcp --for <client>" before serving).
 var (
@@ -50,7 +50,7 @@ func setProfile(p string) {
 // compactCommands is the one list of canonical pc commands. The schema enum, the
 // unknown-c error and the tests are built from it so they can't drift apart.
 // Aliases in compactAlias (and model names) still work for models that ignore the enum.
-var compactCommands = []string{"open", "find", "ls", "read", "write", "edit", "run", "web", "ai", "office", "rag", "sys", "model", "more", "help", "files", "job", "saved", "browser", "window", "media", "git", "check", "plan"}
+var compactCommands = []string{"open", "find", "ls", "read", "write", "edit", "run", "web", "ai", "office", "rag", "sys", "model", "more", "help", "files", "job", "saved", "browser", "window", "media", "git", "check", "plan", "phone"}
 
 var compactTool = buildCompactTool()
 
@@ -137,6 +137,10 @@ func callCompactP(raw json.RawMessage, progress func(string)) (string, []toolIma
 	if c == "" {
 		return "", nil, errors.New("give c (a command). " + firstLine(activeDesc))
 	}
+	// an install's APK is fetched and checked before any approval is asked
+	if err := phonePreflight(c, args); err != nil {
+		return "", nil, errors.New(clip1(err.Error(), 600))
+	}
 	if localMode {
 		confirm := str(args, "confirm")
 		if confirm == "" {
@@ -209,6 +213,9 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		return moreOut(str(a, "id"), intArg(a, "from")), nil, nil
 	case "plan", "todo", "tasks":
 		return toolPlan(a), nil, nil
+	case "phone", "android", "install_app", "apk", "mobile":
+		out, err := toolPhoneCmd(a)
+		return out, nil, err
 	case "remember":
 		a["action"] = "remember"
 		fixArgs("rag", a)
@@ -462,6 +469,9 @@ func compactHelp(c string) string {
 	case "more":
 		return "more{id,from}: next part of a cut result; from = character offset."
 	}
+	if phoneCommands[strings.ToLower(c)] {
+		return phoneHelp
+	}
 	name, ok := compactAlias[strings.ToLower(c)]
 	if !ok {
 		return "unknown command " + c
@@ -674,7 +684,11 @@ var shortHelp = map[string]string{
 	"git":     "git{action:status|diff|log|commit|push|pull|clone|ci,path,message,paths[],full,ref,n,url,to,wait_seconds}: never as admin; ci = latest GitHub Actions run, failing lines only.",
 	"check":   "check{path,action:check|build,fix}: lint/type-check, or build+tests; failing lines only. Run after every code change.",
 	"plan":    "plan{set:[steps]|add:step|done:n|show}: short task list for this session; set it first, mark each step done.",
+	"phone":   phoneHelp,
 }
+
+const phoneHelp = `phone{action}: the user's Android phone. status (route, engine, battery) | apps{filter} | launch{package} | uninstall{package} | install: one of path (.apk on the PC), url (direct .apk link), repo (owner/name, newest release; tag optional); test:true for debug builds, replace (default true). The user approves installs/uninstalls in RemoteAI.
+e.g. {"action":"install","repo":"Qcenaman/AdbSaver"}`
 
 var helpKey = map[string]string{"scan": "ls", "system": "sys", "local_ai": "ai", "run_job": "files", "find": "find", "read": "read", "run": "run", "web": "web", "office": "office", "rag": "rag", "job": "job", "saved": "saved", "browser": "browser", "window": "window", "media": "media", "git": "git", "check": "check"}
 
