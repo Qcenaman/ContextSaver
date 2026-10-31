@@ -22,7 +22,28 @@ const compactDesc = `Controls the user's Windows PC; you CAN act, so call this i
 open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action:create|edit|read|convert,path,content} rag{query|text} sys{action} model{name|action:list|stop} more{id}
 Also: files job saved browser window media. help{c} = all args.`
 
-var compactTool = json.RawMessage(`{"name":"pc","description":` + strconv.Quote(compactDesc) + `,"inputSchema":{"type":"object","properties":{"c":{"type":"string"},"a":{"type":"object"}},"required":["c"]}}`)
+// compactCommands is the one list of canonical pc commands. The schema enum, the
+// unknown-c error and the tests are built from it so they can't drift apart.
+// Aliases in compactAlias (and model names) still work for models that ignore the enum.
+var compactCommands = []string{"open", "find", "ls", "read", "write", "edit", "run", "web", "ai", "office", "rag", "sys", "model", "more", "help", "files", "job", "saved", "browser", "window", "media"}
+
+var compactTool = buildCompactTool()
+
+func buildCompactTool() json.RawMessage {
+	b, _ := json.Marshal(map[string]any{
+		"name":        "pc",
+		"description": compactDesc,
+		"inputSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"c": map[string]any{"type": "string", "enum": compactCommands},
+				"a": map[string]any{"type": "object", "description": `args for c, e.g. {"path":"D:\x.txt"}`},
+			},
+			"required": []string{"c"},
+		},
+	})
+	return b
+}
 
 // compact command -> full tool name
 var compactAlias = map[string]string{
@@ -176,12 +197,12 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		return compactJob([]map[string]any{st}, a)
 	}
 	if _, isModel := models()[c]; isModel {
-		out, err := useModel(c, 45)
+		out, err := useModel(c, modelLoadWait)
 		return out, nil, err
 	}
 	name, ok := compactAlias[c]
 	if !ok {
-		return "", nil, fmt.Errorf("unknown c %q. Commands: find ls read write edit run web ai sys model more help files job saved browser window media", c)
+		return "", nil, fmt.Errorf("unknown c %q. Commands: %s", c, strings.Join(compactCommands, " "))
 	}
 	fixArgs(name, a)
 	note, _ := a["_note"].(string)
@@ -360,7 +381,9 @@ func compactHelp(c string) string {
 	case "edit":
 		return "edit{path,find,replace,regex}: replace text in a file. Or edits:[{find,replace,regex,count}], or append:text."
 	case "model":
-		return "model{action:list|use|stop,name}: list = models and which is loaded; use name=qwen|oss|oss-fast|oss-free loads it on port 8080 (the chat pauses until it's loaded); stop unloads it."
+		return "model{action:list|use|stop,name}: list = models and which is loaded; use name=" + strings.Join(modelNames(), "|") + " loads it on port 8080 (the chat pauses until it's loaded); stop unloads it."
+	case "help":
+		return "help{c,full}: short args for command c; full:true = every option. No c = the command list."
 	case "more":
 		return "more{id,from}: next part of a cut result; from = character offset."
 	}

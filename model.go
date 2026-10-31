@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,7 +21,11 @@ import (
 var defaultModels = map[string]string{
 	"qwen":     `D:\llama.cpp\start-qwen3.6-27b-nothink.bat`,
 	"oss":      `D:\llama.cpp\start-gpt-oss-120b.bat`,
-	"oss-fast": `D:\llama.cpp\start-gpt-oss-120b-SPEC.bat`,
+	// oss-fast (EAGLE3 SPEC) measured slower than plain gpt-oss with experts on the CPU,
+	// so it points to the plain script.
+	"oss-fast":   `D:\llama.cpp\start-gpt-oss-120b.bat`,
+	"gemma":      `D:\llama.cpp\start-gemma-4-31b.bat`,
+	"qwen-think": `D:\llama.cpp\start-qwen3.6-27b.bat`,
 	"oss-free": `D:\llama.cpp\start-gpt-oss-120b-derestricted.bat`,
 }
 
@@ -131,7 +136,7 @@ func toolModel(a map[string]any) (string, error) {
 	case "list", "status":
 		return modelStatus(), nil
 	case "use", "load", "switch":
-		return useModel(name, 45)
+		return useModel(name, modelLoadWait)
 	case "stop", "unload":
 		return stopModel(), nil
 	}
@@ -181,6 +186,7 @@ func useModel(name string, waitSecs int) (string, error) {
 	}
 	waitNote := waitForAIJobs(60 * time.Second)
 	stopped := stopAllModels(port, false)
+	waitNote += vramWarning(name, s)
 	setAIScript(s)
 	if _, err := startScript(s); err != nil {
 		return "", fmt.Errorf("couldn't start %s: %v", s, err)
@@ -193,6 +199,54 @@ func useModel(name string, waitSecs int) (string, error) {
 		}
 	}
 	return name + " is loading on port " + fmt.Sprint(port) + stoppedNote(stopped) + waitNote + "; check with model{action:list}", nil
+}
+
+// modelLoadWait is how long a tool call waits for a model to load (measured 10-30 s).
+const modelLoadWait = 60
+
+// bigModelVRAMGB is the free VRAM Qwen and Gemma need at full context (~31.7-32 of 32.6 GB);
+// with less they spill into shared memory and run ~5x slower.
+const bigModelVRAMGB = 31.0
+
+func needsFullGPU(name, script string) bool {
+	x := strings.ToLower(name + " " + filepath.Base(script))
+	return strings.Contains(x, "qwen") || strings.Contains(x, "gemma")
+}
+
+// vramWarning waits a few seconds for VRAM freed by stopped models, then warns when a
+// full-GPU model won't fit.
+func vramWarning(name, script string) string {
+	if !needsFullGPU(name, script) {
+		return ""
+	}
+	var free float64
+	for i := 0; i < 8; i++ {
+		f, ok := freeVRAMGB()
+		if !ok {
+			return ""
+		}
+		if free = f; free >= bigModelVRAMGB {
+			return ""
+		}
+		time.Sleep(time.Second)
+	}
+	w := fmt.Sprintf("; WARNING: only %.1f GB VRAM free, %s needs ~32 GB and will spill into shared memory (~5x slower)", free, name)
+	if b := gpuBusy(); b != "" {
+		return w + ": " + b
+	}
+	return w + "; close games or other GPU programs, then load it again"
+}
+
+func freeVRAMGB() (float64, bool) {
+	out, err := runQuiet(15*time.Second, "nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits")
+	if err != nil {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(strings.Split(strings.TrimSpace(out), "\n")[0]), 64)
+	if err != nil {
+		return 0, false
+	}
+	return f / 1024, true
 }
 
 func stopModel() string {
