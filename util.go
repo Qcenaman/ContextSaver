@@ -30,6 +30,7 @@ type Config struct {
 	NotifyRepo   string            `json:"notify_repo,omitempty"`
 	Models       map[string]string `json:"models,omitempty"`
 	MaxOut       int               `json:"max_out,omitempty"`
+	Frontend     string            `json:"frontend,omitempty"` // anythingllm | lmstudio; empty = AnythingLLM if installed
 	RagDir       string            `json:"rag_dir,omitempty"`
 }
 

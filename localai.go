@@ -22,6 +22,17 @@ func consoleStartLocalAI() int {
 	if msg := startHelper(); msg != "" {
 		fmt.Println(msg)
 	}
+	if useLMStudio() {
+		out, err := startLMStudio()
+		fmt.Println(out)
+		if err != nil {
+			fmt.Println(err)
+			waitEnter("Press Enter to close.", 0)
+			return 1
+		}
+		time.Sleep(2 * time.Second)
+		return 0
+	}
 	name := modelForScript(cfg.AIScript)
 	if _, ok := models()[name]; !ok {
 		name = "qwen"
@@ -54,8 +65,12 @@ func consoleStartLocalAI() int {
 }
 
 func consoleStopLocalAI() int {
-	fmt.Println(stopModel())
-	if processRunning("anythingllm.exe") {
+	if useLMStudio() {
+		fmt.Println(stopLMStudio())
+	} else {
+		fmt.Println(stopModel())
+	}
+	if !useLMStudio() && processRunning("anythingllm.exe") {
 		quietCmd("taskkill", "/IM", "AnythingLLM.exe", "/T").Run() // ask it to close first
 		for i := 0; i < 20 && processRunning("anythingllm.exe"); i++ {
 			time.Sleep(500 * time.Millisecond)
@@ -112,13 +127,18 @@ func writeDesktopShortcuts(exe string) {
 		return
 	}
 	icon := anythingLLMExe()
+	startDesc, stopDesc := "Load the local model and open AnythingLLM", "Stop the local model and close AnythingLLM"
+	if useLMStudio() {
+		icon = exe
+		startDesc, stopDesc = "Start LM Studio's server and load the local model", "Unload the local model and stop LM Studio's server"
+	}
 	if !exists(icon) {
 		icon = exe
 	}
 	ps := ""
 	for _, s := range []struct{ name, arg, desc string }{
-		{"Local AI", "start", "Load the local model and open AnythingLLM"},
-		{"Stop Local AI", "stop", "Stop the local model and close AnythingLLM"},
+		{"Local AI", "start", startDesc},
+		{"Stop Local AI", "stop", stopDesc},
 	} {
 		lnk := filepath.Join(desktopDir(), s.name+".lnk")
 		ps += fmt.Sprintf("$s=$w.CreateShortcut('%s');$s.TargetPath='%s';$s.Arguments='%s';$s.WorkingDirectory='%s';$s.IconLocation='%s,0';$s.Description='%s';$s.WindowStyle=7;$s.Save();",

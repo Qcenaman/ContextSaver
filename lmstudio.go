@@ -12,11 +12,20 @@ import (
 	"time"
 )
 
-// LM Studio support. When LM Studio's server answers and no llama.cpp script server
-// does, ContextSaver works with LM Studio instead of starting the llama.cpp scripts:
-// the ai command uses the model LM Studio has loaded, and model{} switches with lms.
+// LM Studio support. The front end (AnythingLLM or LM Studio) is the config choice
+// "frontend"; empty means AnythingLLM when it is installed, else LM Studio. With LM
+// Studio, models load with lms, the ai command uses LM Studio's loaded model, and
+// Start/Stop Local AI start and stop LM Studio's server.
 
-const lmsBase = "http://127.0.0.1:1234"
+var lmsBase = "http://127.0.0.1:1234"
+
+// Hooks so tests don't touch real models.
+var (
+	lmsCmd        = func(d time.Duration, args ...string) error { return runWithTimeout(d, lmsExe(), args...) }
+	lmsStopOthers = stopAllModels
+	lmsGPUBusy    = gpuBusyExcept
+	lmsVRAM       = vramWarning
+)
 
 // lmsNames maps ContextSaver's model names to LM Studio model keys.
 var lmsNames = map[string]string{
@@ -30,6 +39,17 @@ type lmsModel struct {
 	ID    string `json:"id"`
 	Type  string `json:"type"`
 	State string `json:"state"`
+}
+
+// useLMStudio: LM Studio is the chosen front end.
+func useLMStudio() bool {
+	switch strings.ToLower(strings.ReplaceAll(strings.TrimSpace(cfg.Frontend), " ", "")) {
+	case "lmstudio", "lm-studio":
+		return true
+	case "anythingllm":
+		return false
+	}
+	return !exists(anythingLLMExe()) && exists(lmsExe())
 }
 
 func lmsModels() ([]lmsModel, bool) {
@@ -59,10 +79,14 @@ func lmsLoaded() string {
 	return ""
 }
 
-// lmsMode: LM Studio is the model server in use (its server answers and the llama.cpp port doesn't).
+// lmsMode: model{} works through LM Studio (the chosen front end, or its server
+// answers while the llama.cpp port doesn't).
 func lmsMode() bool {
 	if cfg.AIEndpoint != "" {
 		return false
+	}
+	if useLMStudio() {
+		return true
 	}
 	if _, ok := lmsModels(); !ok {
 		return false
@@ -120,23 +144,38 @@ func lmsStatus() string {
 	return strings.TrimSpace(b.String())
 }
 
+func lmsServerStart() error {
+	if err := lmsCmd(60*time.Second, "server", "start"); err != nil {
+		return fmt.Errorf("couldn't start LM Studio's server: %v", err)
+	}
+	return nil
+}
+
 // lmsUse loads a model in LM Studio after stopping every other local model.
 func lmsUse(name string) (string, error) {
+	if _, up := lmsModels(); !up {
+		if err := lmsServerStart(); err != nil {
+			return "", err
+		}
+	}
 	key := lmsKey(name)
 	if key == "" {
 		return "", fmt.Errorf("unknown model %q; have: %s", name, strings.Join(lmsNameList(), ", "))
+	}
+	if s, ok := models()[strings.ToLower(name)]; ok {
+		setAIScript(s) // Start Local AI loads the last-used model
 	}
 	if lmsLoaded() == key {
 		return name + " is already loaded in LM Studio", nil
 	}
 	_, port := scriptAddr(firstScript())
-	if w := gpuBusyExcept(port); w != "" {
+	if w := lmsGPUBusy(port); w != "" {
 		return "", errors.New("not switching: " + w + ". Stop that first")
 	}
 	waitNote := waitForAIJobs(60 * time.Second)
-	stopped := stopAllModels(port, false) // also unloads LM Studio's current model
-	waitNote += vramWarning(name, key)
-	err := runWithTimeout(time.Duration(modelLoadWait+30)*time.Second, lmsExe(), "load", key, "-y")
+	stopped := lmsStopOthers(port, false) // also unloads LM Studio's current model
+	waitNote += lmsVRAM(name, key)
+	err := lmsCmd(time.Duration(modelLoadWait+30)*time.Second, "load", key, "-y")
 	if lmsLoaded() == key {
 		return name + " loaded in LM Studio" + stoppedNote(stopped) + waitNote, nil
 	}
@@ -144,4 +183,79 @@ func lmsUse(name string) (string, error) {
 		return "", fmt.Errorf("LM Studio couldn't load %s: %v", key, err)
 	}
 	return name + " is loading in LM Studio" + stoppedNote(stopped) + waitNote + "; check with model{action:list}", nil
+}
+
+// startModelName: the last-used model (config ai_script), else qwen.
+func startModelName() string {
+	if n := modelForScript(cfg.AIScript); lmsNames[n] != "" {
+		return n
+	}
+	return "qwen"
+}
+
+// startLMStudio: Start Local AI with LM Studio = its server, then the configured model.
+func startLMStudio() (string, error) {
+	if err := lmsServerStart(); err != nil {
+		return "", err
+	}
+	if cur := lmsLoaded(); cur != "" {
+		return "LM Studio server on; using the loaded model " + cur, nil
+	}
+	out, err := lmsUse(startModelName())
+	if err != nil {
+		return "", err
+	}
+	return "LM Studio server on; " + out, nil
+}
+
+// stopLMStudio: Stop Local AI with LM Studio = unload every model, stop the server.
+func stopLMStudio() string {
+	if _, up := lmsModels(); !up {
+		return "LM Studio server isn't running"
+	}
+	var out []string
+	if err := lmsCmd(30*time.Second, "unload", "--all"); err != nil {
+		out = append(out, "unload failed: "+err.Error())
+	} else {
+		out = append(out, "LM Studio models unloaded")
+	}
+	if err := lmsCmd(30*time.Second, "server", "stop"); err != nil {
+		out = append(out, "server stop failed: "+err.Error())
+	} else {
+		out = append(out, "server stopped")
+	}
+	return strings.Join(out, "; ")
+}
+
+// lmStudioMCPPath is LM Studio's mcp.json ("" when LM Studio isn't installed).
+func lmStudioMCPPath() string {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	d := filepath.Join(h, ".lmstudio")
+	if !exists(d) {
+		return ""
+	}
+	return filepath.Join(d, "mcp.json")
+}
+
+// connectLMStudio adds contextsaver to LM Studio's mcp.json, keeping its other servers.
+func connectLMStudio(target string) (string, error) {
+	p := lmStudioMCPPath()
+	if p == "" || configHasEntry(p, target) {
+		return p, nil
+	}
+	return p, editClaudeConfig(p, func(s map[string]any) {
+		s["contextsaver"] = map[string]any{"command": target, "args": []string{"mcp"}}
+	})
+}
+
+// disconnectLMStudio removes contextsaver from LM Studio's mcp.json.
+func disconnectLMStudio() (string, error) {
+	p := lmStudioMCPPath()
+	if p == "" || !exists(p) {
+		return "", nil
+	}
+	return p, editClaudeConfig(p, func(s map[string]any) { delete(s, "contextsaver") })
 }

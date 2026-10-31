@@ -516,6 +516,9 @@ func openAI(j *Job, want string) (*aiClient, func(), error) {
 			lc.loadCtx()
 			return lc, noop, nil
 		}
+		if useLMStudio() {
+			return nil, noop, errors.New("no model is loaded in LM Studio; load one with model{name}")
+		}
 		j.setCurrent("starting the local AI model…")
 		p, err := startScript(cfg.AIScript)
 		if err != nil {

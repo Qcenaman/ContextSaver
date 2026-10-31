@@ -239,8 +239,14 @@ func consoleInstall() {
 		fmt.Println("Connected to AnythingLLM in", p)
 		connected++
 	}
+	if p, err := connectLMStudio(target); err != nil {
+		fmt.Println("Couldn't update", p+":", err)
+	} else if p != "" {
+		fmt.Println("Connected to LM Studio in", p)
+		connected++
+	}
 	if connected == 0 {
-		fmt.Printf("\nAdd this to the \"mcpServers\" section of AnythingLLM's anythingllm_mcp_servers.json by hand:\n  \"contextsaver\": {\"command\": %q, \"args\": [\"mcp\"]}\n", target)
+		fmt.Printf("\nAdd this to the \"mcpServers\" section of AnythingLLM's anythingllm_mcp_servers.json or LM Studio's mcp.json by hand:\n  \"contextsaver\": {\"command\": %q, \"args\": [\"mcp\"]}\n", target)
 	}
 	refreshHelper()
 	os.MkdirAll(jobsFolder(), 0o755)
@@ -262,7 +268,12 @@ func consoleUninstall() {
 		}
 		fmt.Println("Disconnected from AnythingLLM in", p)
 	}
-	fmt.Println("Restart Claude to finish. Your saved jobs and logs are kept in", appHome)
+	if p, err := disconnectLMStudio(); err != nil {
+		fmt.Println(err)
+	} else if p != "" {
+		fmt.Println("Disconnected from LM Studio in", p)
+	}
+	fmt.Println("Restart AnythingLLM or LM Studio to finish. Your saved jobs and logs are kept in", appHome)
 }
 
 func copyPlain(src, dst string) error {

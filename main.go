@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-const appVersion = "1.8.0"
+const appVersion = "1.9.0"
 
 func main() {
 	initApp()
