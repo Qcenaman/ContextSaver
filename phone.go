@@ -423,7 +423,7 @@ func preparePhoneAPK(a map[string]any) (*preparedAPK, error) {
 	if err != nil {
 		return nil, err
 	}
-	tag := str(a, "tag")
+	tag := phoneTag(a)
 	key := kind + "\x00" + val + "\x00" + tag
 	prepMu.Lock()
 	defer prepMu.Unlock()
@@ -482,6 +482,16 @@ func preparePhoneAPK(a map[string]any) (*preparedAPK, error) {
 	p.size, p.mod, p.at = fi.Size(), fi.ModTime(), time.Now()
 	prepared[key] = p
 	return p, nil
+}
+
+// phoneTag: tag:"latest"/"newest" means the newest release, not a tag of that name.
+func phoneTag(a map[string]any) string {
+	t := strings.TrimSpace(str(a, "tag", "version"))
+	switch strings.ToLower(t) {
+	case "latest", "newest", "last", "current":
+		return ""
+	}
+	return t
 }
 
 func forgetPrepared(p *preparedAPK) {

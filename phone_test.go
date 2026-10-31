@@ -110,6 +110,14 @@ func TestRepoResolverPicksAPK(t *testing.T) {
 	if name, _, _, tag, err = resolveRepoAPK("Qcenaman/AdbSaver", "v1.2"); err != nil || name != "app-debug.apk" || tag != "v1.2" {
 		t.Fatalf("tag: %s %s %v", name, tag, err)
 	}
+	for _, tg := range []string{"latest", "Latest", "newest"} {
+		if phoneTag(map[string]any{"tag": tg}) != "" {
+			t.Errorf("tag %q not treated as newest", tg)
+		}
+	}
+	if phoneTag(map[string]any{"tag": "build-30"}) != "build-30" {
+		t.Fatal("real tag dropped")
+	}
 	if _, _, _, ok := pickAPKAsset(ghRelease{}); ok {
 		t.Fatal("empty release gave an asset")
 	}
