@@ -136,15 +136,28 @@ func toolModel(a map[string]any) (string, error) {
 	case "list", "status":
 		return modelStatus(), nil
 	case "use", "load", "switch":
-		out, err := useModel(name, modelLoadWait)
+		out, err := useModel(name, modelLoadWait, a["force"] == true)
 		if err == nil {
 			out += syncFrontends()
 		}
 		return out, err
 	case "stop", "unload":
-		return stopModel(), nil
+		return stopModel(a["force"] == true), nil
+	case "pin", "keep":
+		setGuardSetting("keep_model_running", true)
+		return "pinned: nothing stops the model server on its own now\n" + modelStatus(), nil
+	case "unpin":
+		setGuardSetting("keep_model_running", false)
+		return "unpinned: a server ContextSaver started stops after its idle time\n" + modelStatus(), nil
+	case "idle":
+		m := intArg(a, "minutes")
+		if m <= 0 {
+			return "", errors.New("idle needs minutes (1 or more)")
+		}
+		setGuardSetting("model_idle_minutes", m)
+		return fmt.Sprintf("idle stop after %d min\n", m) + modelStatus(), nil
 	}
-	return "", errors.New("action must be list, use or stop")
+	return "", errors.New("action must be list, use, stop, pin, unpin or idle")
 }
 
 func modelStatus() string {
@@ -165,16 +178,21 @@ func modelStatus() string {
 		fmt.Fprintf(&b, "%s%s\n", n, mark)
 	}
 	if cur == "" {
-		b.WriteString("nothing loaded")
+		b.WriteString("nothing loaded\n")
 	} else if st == "loading" {
-		b.WriteString("loading " + cur)
+		b.WriteString("loading " + cur + "\n")
+	}
+	_, port := scriptAddr(firstScript())
+	b.WriteString(guardStatusLine("model server", port))
+	if embedHealthy() {
+		b.WriteString("\n" + guardStatusLine("embedding", ragPort))
 	}
 	return strings.TrimSpace(b.String())
 }
 
-func useModel(name string, waitSecs int) (string, error) {
+func useModel(name string, waitSecs int, force bool) (string, error) {
 	if lmsMode() {
-		return lmsUse(name)
+		return lmsUse(name, force)
 	}
 	s, ok := models()[name]
 	if !ok {
@@ -185,30 +203,62 @@ func useModel(name string, waitSecs int) (string, error) {
 	}
 	host, port := scriptAddr(s)
 	al := scriptAlias(s)
-	for _, m := range servedModels(host, port) {
+	served := servedModels(host, port)
+	for _, m := range served {
 		if al != "" && strings.EqualFold(m, al) {
 			setAIScript(s)
-			return name + " is already loaded" + stoppedNote(stopAllModels(port, true)), nil
+			return name + " is already loaded", nil
 		}
 	}
-	if w := gpuBusyExcept(port); w != "" {
+	if w := modelGPUBusy(port); w != "" {
 		return "", errors.New("not switching: " + w + ". Stop that first or switch from the ContextSaver shortcut")
 	}
-	waitNote := waitForAIJobs(60 * time.Second)
-	stopped := stopAllModels(port, false)
+	// The server now on the port has to go first: only when ContextSaver owns it and it's idle.
+	what := fmt.Sprintf("the server on port %d", port)
+	if len(served) > 0 {
+		what += " (" + strings.Join(uniq(served), ",") + ")"
+	}
+	refuse := func(why string) (string, error) {
+		return "", fmt.Errorf("not switching to %s: %s %s. It was left running", name, what, why)
+	}
+	if st, _ := inspectServer(port); st.Up || st.Owner != ownerNone {
+		if ok, why := stopVerdict(st, manualStop, force); !ok {
+			return refuse(why)
+		}
+	}
+	waitNote, err := waitAIJobsOrRefuse(60 * time.Second)
+	if err != nil {
+		return refuse("is in use: " + err.Error())
+	}
+	var stopped []string
+	if st, e := inspectServer(port); st.Up || st.Owner != ownerNone {
+		if ok, why := stopVerdict(st, manualStop, force); !ok { // re-checked after the wait
+			return refuse(why)
+		}
+		killServer(port, e)
+		stopped = append(stopped, strings.TrimPrefix(what, "the "))
+		if guardPIDOnPort(port) > 0 || probeServer(port).Up {
+			return "", fmt.Errorf("couldn't free port %d for %s", port, name)
+		}
+	}
+	others, left := stopOwnedOthers(port)
+	stopped = append(stopped, others...)
 	waitNote += vramWarning(name, s)
 	setAIScript(s)
-	if _, err := startScript(s); err != nil {
+	p, err := guardStartScript(s)
+	if err != nil {
 		return "", fmt.Errorf("couldn't start %s: %v", s, err)
 	}
+	claimServer(p, port, name, s, waitSecs)
+	note := stoppedNote(stopped) + leftNote(left) + waitNote
 	deadline := time.Now().Add(time.Duration(waitSecs) * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Second)
 		if len(servedModels(host, port)) > 0 && !serverLoading(host, port) {
-			return name + " loaded on port " + fmt.Sprint(port) + stoppedNote(stopped) + waitNote, nil
+			return name + " loaded on port " + fmt.Sprint(port) + note, nil
 		}
 	}
-	return name + " is loading on port " + fmt.Sprint(port) + stoppedNote(stopped) + waitNote + "; check with model{action:list}", nil
+	return name + " is loading on port " + fmt.Sprint(port) + note + "; check with model{action:list}", nil
 }
 
 // modelLoadWait is how long a tool call waits for a model to load (measured 10-30 s).
@@ -270,14 +320,36 @@ func freeVRAMGB() (float64, bool) {
 	return f / 1024, true
 }
 
-func stopModel() string {
+// stopModel is the user's stop (model{stop}, Stop model, Stop Local AI): it stops the
+// model server only when ContextSaver started it, it isn't busy and isn't pinned
+// (force:true also stops an external or pinned one, never a busy one).
+func stopModel(force bool) string {
 	_, port := scriptAddr(firstScript())
-	waitNote := waitForAIJobs(60 * time.Second)
-	stopped := stopAllModels(port, false)
-	if len(stopped) == 0 {
+	waitNote, err := waitAIJobsOrRefuse(60 * time.Second)
+	if err != nil {
+		return "nothing stopped: " + err.Error()
+	}
+	var stopped, left []string
+	served := uniq(servedModels(guardHost, port))
+	what := fmt.Sprintf("server on port %d", port)
+	if len(served) > 0 {
+		what = strings.Join(served, ",") + " on port " + fmt.Sprint(port)
+	}
+	if ok, why := guardStop(port, manualStop, force); ok {
+		stopped = append(stopped, what)
+	} else if why != "not running" {
+		left = append(left, what+" ("+why+")")
+	}
+	o, l := stopOwnedOthers(port)
+	stopped, left = append(stopped, o...), append(left, l...)
+	if len(stopped) == 0 && len(left) == 0 {
 		return "nothing loaded"
 	}
-	return "stopped " + strings.Join(stopped, ", ") + "; VRAM freed" + waitNote
+	out := "nothing stopped"
+	if len(stopped) > 0 {
+		out = "stopped " + strings.Join(stopped, ", ") + "; VRAM freed"
+	}
+	return out + leftNote(left) + waitNote
 }
 
 func setAIScript(s string) {
@@ -333,31 +405,26 @@ func aiServerUp() bool {
 	return len(servedModels(host, port)) > 0
 }
 
-func killPort(port int) {
-	for i := 0; i < 8; i++ {
-		pid := pidOnPort(port)
-		if pid <= 0 {
-			return
-		}
-		killTree(pid)
-		time.Sleep(time.Second)
-	}
-}
-
 func portOpen(port int) bool { return pidOnPort(port) > 0 }
 
-// consoleModel: contextsaver model [qwen|oss|oss-fast|stop|list]
+// consoleModel: contextsaver model [qwen|oss|…|stop|list|pin|unpin] [--force]
 func consoleModel(args []string) int {
 	if len(args) == 0 || args[0] == "list" || args[0] == "status" {
 		fmt.Println(modelStatus())
 		return 0
 	}
+	force := len(args) > 1 && args[1] == "--force"
 	if args[0] == "stop" {
-		fmt.Println(stopModel())
+		fmt.Println(stopModel(force))
+		return 0
+	}
+	if args[0] == "pin" || args[0] == "unpin" {
+		out, _ := toolModel(map[string]any{"action": args[0]})
+		fmt.Println(out)
 		return 0
 	}
 	fmt.Println("Loading", args[0], "…")
-	out, err := useModel(args[0], 600)
+	out, err := useModel(args[0], 600, force)
 	if err != nil {
 		fmt.Println(err)
 		waitEnter("Press Enter to close.", 0)
@@ -390,126 +457,9 @@ func stoppedNote(stopped []string) string {
 // localModelProcs are programs that serve a local model and hold VRAM while running.
 var localModelProcs = []string{"llama-server", "llama-cli", "llama-run", "koboldcpp", "llamafile", "text-generation-launcher", "lemonade-server"}
 
-// stopAllModels stops every local model, not only the one on port: other llama.cpp
-// servers on any port, KoboldCpp, models loaded in Ollama and in LM Studio.
-// It returns what it stopped.
-func stopAllModels(port int, keepPort bool) []string {
-	var stopped []string
-	keep := 0
-	if keepPort {
-		keep = pidOnPort(port)
-	}
-	portPID := pidOnPort(port)
-	if pid := portPID; pid > 0 && !keepPort {
-		if m := uniq(servedModels("127.0.0.1", port)); len(m) > 0 {
-			stopped = append(stopped, strings.Join(m, ","))
-		} else {
-			stopped = append(stopped, fmt.Sprintf("server on port %d", port))
-		}
-		killPort(port)
-	}
-	if ps, err := procs(); err == nil {
-		self := os.Getpid()
-		for _, p := range ps {
-			if p.pid == self || p.pid == portPID || (keep > 0 && p.pid == keep) {
-				continue
-			}
-			n := strings.ToLower(strings.TrimSuffix(p.name, ".exe"))
-			n = strings.TrimSuffix(n, ".EXE")
-			for _, w := range localModelProcs {
-				if strings.HasPrefix(n, w) {
-					killTree(p.pid)
-					stopped = append(stopped, fmt.Sprintf("%s (pid %d)", p.name, p.pid))
-					break
-				}
-			}
-		}
-	}
-	stopped = append(stopped, unloadOllama()...)
-	stopped = append(stopped, unloadLMStudio()...)
-	return stopped
-}
-
-// unloadOllama asks Ollama to drop every loaded model; Ollama itself keeps running.
-func unloadOllama() []string {
-	hc := &http.Client{Timeout: 3 * time.Second}
-	resp, err := hc.Get("http://127.0.0.1:11434/api/ps")
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	var r struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
-	}
-	if json.NewDecoder(resp.Body).Decode(&r) != nil {
-		return nil
-	}
-	var out []string
-	for _, m := range r.Models {
-		b, _ := json.Marshal(map[string]any{"model": m.Name, "keep_alive": 0})
-		hc2 := &http.Client{Timeout: 30 * time.Second}
-		if rr, err := hc2.Post("http://127.0.0.1:11434/api/generate", "application/json", bytes.NewReader(b)); err == nil {
-			rr.Body.Close()
-			out = append(out, "Ollama "+m.Name)
-		}
-	}
-	return out
-}
-
-// unloadLMStudio unloads LM Studio's models with its lms command, when LM Studio has one loaded.
-func unloadLMStudio() []string {
-	hc := &http.Client{Timeout: 3 * time.Second}
-	resp, err := hc.Get("http://127.0.0.1:1234/api/v0/models")
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	var r struct {
-		Data []struct {
-			ID    string `json:"id"`
-			State string `json:"state"`
-		} `json:"data"`
-	}
-	if json.NewDecoder(resp.Body).Decode(&r) != nil {
-		return nil
-	}
-	var loaded []string
-	for _, m := range r.Data {
-		if m.State == "loaded" {
-			loaded = append(loaded, "LM Studio "+m.ID)
-		}
-	}
-	if len(loaded) == 0 {
-		return nil
-	}
-	h, _ := os.UserHomeDir()
-	lms := filepath.Join(h, ".lmstudio", "bin", "lms.exe")
-	if !exists(lms) {
-		lms = "lms"
-	}
-	if err := runWithTimeout(30*time.Second, lms, "unload", "--all"); err != nil {
-		return nil
-	}
-	return loaded
-}
-
 func runWithTimeout(d time.Duration, name string, args ...string) error {
 	_, err := runQuiet(d, name, args...)
 	return err
-}
-
-func uniq(xs []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, x := range xs {
-		if !seen[x] {
-			seen[x] = true
-			out = append(out, x)
-		}
-	}
-	return out
 }
 
 // AI jobs of TokenSaver (Claude's tool) and ContextSaver read through the loaded model.

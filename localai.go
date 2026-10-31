@@ -10,7 +10,8 @@ import (
 )
 
 // Desktop icons: "Local AI" loads the last-used model and opens AnythingLLM;
-// "Stop Local AI" stops every local model and closes AnythingLLM, which also ends
+// "Stop Local AI" stops the local model ContextSaver started (when idle; servers
+// started elsewhere stay up for RemoteAI and others) and closes AnythingLLM, which also ends
 // ContextSaver and its admin helper. "Local AI" starts the admin helper first;
 // "Stop Local AI" closes everything.
 
@@ -42,7 +43,7 @@ func consoleStartLocalAI() int {
 		fmt.Println("Using the loaded model:", cur)
 	} else {
 		fmt.Println("Loading", name, "…")
-		out, err := useModel(name, 600)
+		out, err := useModel(name, 600, false)
 		if err != nil {
 			fmt.Println(err)
 			waitEnter("Press Enter to close.", 0)
@@ -67,9 +68,9 @@ func consoleStartLocalAI() int {
 
 func consoleStopLocalAI() int {
 	if useLMStudio() {
-		fmt.Println(stopLMStudio())
+		fmt.Println(stopLMStudio(false))
 	} else {
-		fmt.Println(stopModel())
+		fmt.Println(stopModel(false))
 	}
 	if !useLMStudio() && processRunning("anythingllm.exe") {
 		quietCmd("taskkill", "/IM", "AnythingLLM.exe", "/T").Run() // ask it to close first

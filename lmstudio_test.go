@@ -35,7 +35,7 @@ func fakeLMS(t *testing.T, loaded string) *[]string {
 		*calls = append(*calls, strings.Join(args, " "))
 		return nil
 	}
-	lmsStopOthers = func(int, bool) []string { return nil }
+	lmsStopOthers = func(int) ([]string, []string) { return nil, nil }
 	lmsGPUBusy = func(int) string { return "" }
 	lmsVRAM = func(string, string) string { return "" }
 	return calls
@@ -74,11 +74,32 @@ func TestStartLMStudioKeepsLoadedModel(t *testing.T) {
 	}
 }
 
-func TestStopLMStudio(t *testing.T) {
+// Stop Local AI leaves a model ContextSaver didn't load (RemoteAI's) and the server.
+func TestStopLMStudioLeavesExternal(t *testing.T) {
 	calls := fakeLMS(t, "qwen3.6-27b")
-	stopLMStudio()
-	if got := strings.Join(*calls, " | "); got != "unload --all | server stop" {
+	out := stopLMStudio(false)
+	if len(*calls) != 0 || !strings.Contains(out, "left loaded") {
+		t.Fatalf("lms calls: %v; %s", *calls, out)
+	}
+}
+
+func TestStopLMStudioOwned(t *testing.T) {
+	calls := fakeLMS(t, "qwen3.6-27b")
+	editReg(func(r *guardReg) { r.LMSModel, r.LMSServer = "qwen3.6-27b", true })
+	stopLMStudio(false)
+	if got := strings.Join(*calls, " | "); got != "unload qwen3.6-27b | server stop" {
 		t.Fatalf("lms calls: %s", got)
+	}
+}
+
+// A model loaded elsewhere in LM Studio isn't replaced by a switch.
+func TestLMStudioSwitchRefusesExternal(t *testing.T) {
+	calls := fakeLMS(t, "gemma-4-31b-it")
+	if _, err := lmsUse("qwen", false); err == nil || !strings.Contains(err.Error(), "not switching") {
+		t.Fatalf("switched over an external model: %v", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("lms calls: %v", *calls)
 	}
 }
 

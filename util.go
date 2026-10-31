@@ -43,6 +43,8 @@ type Config struct {
 	LMSBind             string            `json:"lms_bind,omitempty"`                  // lms server start --bind (0.0.0.0 for RemoteAI over Tailscale)
 	ApprovalBind        string            `json:"approval_bind,omitempty"`             // default 127.0.0.1; 0.0.0.0 for RemoteAI over Tailscale      // LM Studio API token for ContextSaver's own calls
 	RagDir              string            `json:"rag_dir,omitempty"`
+	KeepModelRunning    bool              `json:"keep_model_running,omitempty"` // pin: nothing auto-stops the model server
+	ModelIdleMinutes    int               `json:"model_idle_minutes,omitempty"` // idle stop of servers ContextSaver started (default 15)
 }
 
 var (

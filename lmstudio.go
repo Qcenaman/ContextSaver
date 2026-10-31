@@ -22,7 +22,7 @@ var lmsBase = "http://127.0.0.1:1234"
 // Hooks so tests don't touch real models.
 var (
 	lmsCmd        = func(d time.Duration, args ...string) error { return runWithTimeout(d, lmsExe(), args...) }
-	lmsStopOthers = stopAllModels
+	lmsStopOthers = stopOwnedOthers
 	lmsGPUBusy    = gpuBusyExcept
 	lmsVRAM       = vramWarning
 )
@@ -145,7 +145,9 @@ func lmsStatus() string {
 	return strings.TrimSpace(b.String())
 }
 
+// lmsServerStart starts LM Studio's server; one ContextSaver started is its own to stop.
 func lmsServerStart() error {
+	_, wasUp := lmsModels()
 	args := []string{"server", "start"}
 	if cfg.LMSBind != "" {
 		args = append(args, "--bind", cfg.LMSBind)
@@ -153,11 +155,17 @@ func lmsServerStart() error {
 	if err := lmsCmd(60*time.Second, args...); err != nil {
 		return fmt.Errorf("couldn't start LM Studio's server: %v", err)
 	}
+	if !wasUp {
+		editReg(func(r *guardReg) { r.LMSServer = true })
+	}
 	return nil
 }
 
-// lmsUse loads a model in LM Studio after stopping every other local model.
-func lmsUse(name string) (string, error) {
+// lmsUse loads a model in LM Studio. The model LM Studio has loaded is unloaded first
+// only when ContextSaver loaded it (or force); LM Studio can't report whether it is
+// answering a request, so a model loaded elsewhere (RemoteAI, LM Studio itself) is
+// never replaced on its own.
+func lmsUse(name string, force bool) (string, error) {
 	if _, up := lmsModels(); !up {
 		if err := lmsServerStart(); err != nil {
 			return "", err
@@ -170,24 +178,43 @@ func lmsUse(name string) (string, error) {
 	if s, ok := models()[strings.ToLower(name)]; ok {
 		setAIScript(s) // Start Local AI loads the last-used model
 	}
-	if lmsLoaded() == key {
+	cur := lmsLoaded()
+	if cur == key {
 		return name + " is already loaded in LM Studio", nil
+	}
+	if cur != "" && readReg().LMSModel != cur && !force {
+		return "", fmt.Errorf("not switching to %s: LM Studio has %s loaded, which ContextSaver didn't load (RemoteAI or LM Studio itself may be using it). It was left loaded; force:true replaces it", name, cur)
 	}
 	_, port := scriptAddr(firstScript())
 	if w := lmsGPUBusy(port); w != "" {
 		return "", errors.New("not switching: " + w + ". Stop that first")
 	}
-	waitNote := waitForAIJobs(60 * time.Second)
-	stopped := lmsStopOthers(port, false) // also unloads LM Studio's current model
+	waitNote, err := waitAIJobsOrRefuse(60 * time.Second)
+	if err != nil {
+		return "", fmt.Errorf("not switching to %s: %v", name, err)
+	}
+	var stopped []string
+	if cur != "" {
+		if err := lmsCmd(30*time.Second, "unload", cur); err != nil {
+			return "", fmt.Errorf("couldn't unload %s: %v", cur, err)
+		}
+		stopped = append(stopped, "LM Studio "+cur)
+		editReg(func(r *guardReg) { r.LMSModel = "" })
+	}
+	others, left := lmsStopOthers(port)
+	stopped = append(stopped, others...)
 	waitNote += lmsVRAM(name, key)
-	err := lmsCmd(time.Duration(modelLoadWait+30)*time.Second, "load", key, "-y")
+	err = lmsCmd(time.Duration(modelLoadWait+30)*time.Second, "load", key, "-y")
+	note := stoppedNote(stopped) + leftNote(left) + waitNote
 	if lmsLoaded() == key {
-		return name + " loaded in LM Studio" + stoppedNote(stopped) + waitNote, nil
+		editReg(func(r *guardReg) { r.LMSModel = key })
+		return name + " loaded in LM Studio" + note, nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("LM Studio couldn't load %s: %v", key, err)
 	}
-	return name + " is loading in LM Studio" + stoppedNote(stopped) + waitNote + "; check with model{action:list}", nil
+	editReg(func(r *guardReg) { r.LMSModel = key })
+	return name + " is loading in LM Studio" + note + "; check with model{action:list}", nil
 }
 
 // startModelName: the last-used model (config ai_script), else qwen.
@@ -206,28 +233,51 @@ func startLMStudio() (string, error) {
 	if cur := lmsLoaded(); cur != "" {
 		return "LM Studio server on; using the loaded model " + cur, nil
 	}
-	out, err := lmsUse(startModelName())
+	out, err := lmsUse(startModelName(), false)
 	if err != nil {
 		return "", err
 	}
 	return "LM Studio server on; " + out, nil
 }
 
-// stopLMStudio: Stop Local AI with LM Studio = unload every model, stop the server.
-func stopLMStudio() string {
-	if _, up := lmsModels(); !up {
+// stopLMStudio: Stop Local AI with LM Studio = unload the model ContextSaver loaded,
+// and stop LM Studio's server when ContextSaver started it and nothing else is loaded.
+// Models and a server started elsewhere stay (force:true unloads and stops them too).
+func stopLMStudio(force bool) string {
+	ms, up := lmsModels()
+	if !up {
 		return "LM Studio server isn't running"
 	}
-	var out []string
-	if err := lmsCmd(30*time.Second, "unload", "--all"); err != nil {
-		out = append(out, "unload failed: "+err.Error())
-	} else {
-		out = append(out, "LM Studio models unloaded")
+	reg := readReg()
+	var out, left []string
+	for _, m := range ms {
+		if m.State != "loaded" {
+			continue
+		}
+		if m.ID != reg.LMSModel && !force {
+			left = append(left, m.ID)
+			continue
+		}
+		if err := lmsCmd(30*time.Second, "unload", m.ID); err != nil {
+			out = append(out, "unload "+m.ID+" failed: "+err.Error())
+			left = append(left, m.ID)
+		} else {
+			out = append(out, "unloaded "+m.ID)
+		}
 	}
-	if err := lmsCmd(30*time.Second, "server", "stop"); err != nil {
-		out = append(out, "server stop failed: "+err.Error())
-	} else {
-		out = append(out, "server stopped")
+	editReg(func(r *guardReg) { r.LMSModel = "" })
+	switch {
+	case len(left) > 0:
+		out = append(out, "left loaded (not loaded by ContextSaver): "+strings.Join(left, ", ")+"; LM Studio's server stays on")
+	case !reg.LMSServer && !force:
+		out = append(out, "LM Studio's server stays on (ContextSaver didn't start it)")
+	default:
+		if err := lmsCmd(30*time.Second, "server", "stop"); err != nil {
+			out = append(out, "server stop failed: "+err.Error())
+		} else {
+			out = append(out, "server stopped")
+			editReg(func(r *guardReg) { r.LMSServer = false })
+		}
 	}
 	return strings.Join(out, "; ")
 }

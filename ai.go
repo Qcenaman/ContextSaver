@@ -484,8 +484,11 @@ func scriptAddr(script string) (string, int) {
 
 var aiMu sync.Mutex
 
-// openAI returns a client and a stop function. When the app had to start the
-// model itself, stop shuts it down again; a model the user started is left running.
+// openAI returns a client and a release function. The model server is shared
+// (RemoteAI and other tools use it too), so release never stops it: a server this
+// app started is recorded as ContextSaver's and stops only after its idle time,
+// when nothing is processing (serverguard.go). A server already on the port, even
+// one still loading, is used as it is and never stopped.
 func openAI(j *Job, want string) (*aiClient, func(), error) {
 	noop := func() {}
 	hc := &http.Client{Timeout: 10 * time.Minute}
@@ -507,8 +510,27 @@ func openAI(j *Job, want string) (*aiClient, func(), error) {
 			c.loadCtx()
 			return c, stop, nil
 		}
+		release := func() { touchOwned(port) }
 		if c.healthy() {
-			return finish(noop)
+			touchOwned(port)
+			return finish(release)
+		}
+		// Something already holds the port (loading, or starting up): wait for it,
+		// never start a second copy and never stop it.
+		if probeServer(port).Up || guardPIDOnPort(port) > 0 {
+			j.setCurrent(fmt.Sprintf("waiting for the local AI server on port %d to be ready…", port))
+			deadline := time.Now().Add(5 * time.Minute)
+			for time.Now().Before(deadline) {
+				if j.ctx.Err() != nil {
+					return nil, noop, errCanceled
+				}
+				if c.healthy() {
+					touchOwned(port)
+					return finish(release)
+				}
+				time.Sleep(time.Second)
+			}
+			return nil, noop, fmt.Errorf("the server on port %d wasn't ready after 5 minutes; it was left running", port)
 		}
 		// LM Studio has a model loaded: use it rather than starting a second model.
 		if id := lmsLoaded(); id != "" {
@@ -520,14 +542,14 @@ func openAI(j *Job, want string) (*aiClient, func(), error) {
 			return nil, noop, errors.New("no model is loaded in LM Studio; load one with model{name}")
 		}
 		j.setCurrent("starting the local AI model…")
-		p, err := startScript(cfg.AIScript)
+		p, err := guardStartScript(cfg.AIScript)
 		if err != nil {
 			return nil, noop, fmt.Errorf("couldn't start %s: %v", cfg.AIScript, err)
 		}
-		// Stop only what this job started: the script, and the server on the port
-		// only while it is still the one that came up for this job.
+		// If it never gets ready, stop only what this job started: the script, and the
+		// server on the port only while it is still the one that came up for it.
 		ownPID := 0
-		stop := func() { stopOwnLocalAI(p, port, ownPID) }
+		stop := func() { stopOwnLocalAI(p, port, ownPID); unregister(port) }
 		deadline := time.Now().Add(5 * time.Minute)
 		var exitedAt time.Time
 		for time.Now().Before(deadline) {
@@ -535,9 +557,16 @@ func openAI(j *Job, want string) (*aiClient, func(), error) {
 				stop()
 				return nil, noop, errCanceled
 			}
+			if pid := guardPIDOnPort(port); ownPID == 0 && pid > 0 {
+				ownPID = pid // the port was free before the start: the first listener is ours
+			}
 			if c.healthy() {
-				ownPID = pidOnPort(port)
-				return finish(stop)
+				spid := 0
+				if p.cmd != nil && p.cmd.Process != nil {
+					spid = p.cmd.Process.Pid
+				}
+				registerOwned(ownedServer{Port: port, PID: ownPID, ScriptPID: spid, Model: modelForScript(cfg.AIScript), Script: cfg.AIScript})
+				return finish(release)
 			}
 			if exitedAt.IsZero() && p.exited() {
 				exitedAt = time.Now()

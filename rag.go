@@ -497,7 +497,8 @@ func embedHealthy() bool {
 }
 
 // acquire starts the model if needed (on the CPU when cpu is true) and returns a release func.
-// The model stays loaded 3 minutes after the last use, then stops.
+// The model stays loaded 3 minutes after the last use, then stops if nothing (TokenSaver
+// included) is using it. One another program started is used and never stopped here.
 func (s *embedServer) acquire(ctx context.Context, cpu, big bool, status func(string)) (func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -505,7 +506,7 @@ func (s *embedServer) acquire(ctx context.Context, cpu, big bool, status func(st
 		s.idle.Stop()
 		s.idle = nil
 	}
-	if s.proc != nil && s.cpu && !cpu { // move to the GPU for big jobs
+	if s.proc != nil && s.cpu && !cpu && !probeServer(ragPort).Busy { // move to the GPU for big jobs
 		s.stopLocked()
 	}
 	if s.proc == nil || !embedHealthy() {
@@ -517,20 +518,37 @@ func (s *embedServer) acquire(ctx context.Context, cpu, big bool, status func(st
 		}
 	}
 	s.users++
+	if s.proc != nil {
+		touchOwned(ragPort)
+	}
 	return func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.users--
+		if s.proc != nil {
+			touchOwned(ragPort)
+		}
 		if s.users == 0 {
-			s.idle = time.AfterFunc(3*time.Minute, func() {
-				s.mu.Lock()
-				defer s.mu.Unlock()
-				if s.users == 0 {
-					s.stopLocked()
-				}
-			})
+			s.armIdleLocked()
 		}
 	}, nil
+}
+
+// armIdleLocked stops the model after embedIdleMinutes unused; busy (another client)
+// or pinned waits another round.
+func (s *embedServer) armIdleLocked() {
+	s.idle = time.AfterFunc(embedIdleMinutes*time.Minute, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.users != 0 {
+			return
+		}
+		if pinned, _ := guardSettings(); s.proc != nil && (pinned || probeServer(ragPort).Busy) {
+			s.armIdleLocked()
+			return
+		}
+		s.stopLocked()
+	})
 }
 
 func llamaDir() string {
@@ -548,12 +566,17 @@ func (s *embedServer) startLocked(ctx context.Context, cpu, big bool, status fun
 	if !exists(exe) {
 		return fmt.Errorf("llama-server not found in %s", llamaDir())
 	}
-	if embedHealthy() { // left over from another ContextSaver window: fine for the CPU, restarted for the GPU
+	if embedHealthy() { // already running (another ContextSaver window, TokenSaver): use it
+		// A big job moves it to the GPU only when a ContextSaver started it and it's idle;
+		// one started elsewhere is used as it is and never stopped.
 		if cpu || !big {
 			s.adopted = true
 			return nil
 		}
-		killProcs(nil, "llama-server.exe", "--port "+strconv.Itoa(ragPort))
+		if ok, _ := guardStop(ragPort, manualStop, false); !ok {
+			s.adopted = true
+			return nil
+		}
 		time.Sleep(2 * time.Second)
 	}
 	model := loadRagConfig().Model
@@ -583,6 +606,7 @@ func (s *embedServer) startLocked(ctx context.Context, cpu, big bool, status fun
 	done := make(chan struct{})
 	go func() { cmd.Wait(); logf.Close(); close(done) }()
 	s.proc, s.done, s.cpu = cmd, done, cpu
+	registerOwned(ownedServer{Port: ragPort, PID: cmd.Process.Pid, Model: "embed", IdleMinutes: embedIdleMinutes})
 	where := "GPU"
 	if cpu {
 		where = "CPU"
@@ -632,19 +656,31 @@ func (s *embedServer) restart(ctx context.Context, cpu bool, status func(string)
 	return s.startLocked(ctx, cpu, true, status)
 }
 
-// shutdown stops the model when ContextSaver exits.
+// shutdown stops the model this process started when ContextSaver exits, unless it is
+// busy (TokenSaver using it) or pinned: then it stays up, recorded as ContextSaver's,
+// and another ContextSaver stops it once it is idle. One it adopted is left alone.
 func (s *embedServer) shutdown() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.idle != nil {
+		s.idle.Stop()
+		s.idle = nil
+	}
+	if s.proc != nil {
+		if pinned, _ := guardSettings(); pinned || probeServer(ragPort).Busy {
+			s.proc, s.adopted = nil, false
+			return
+		}
+	}
 	s.stopLocked()
 }
 
+// stopLocked stops the model this process started; an adopted one (started by another
+// program) is only let go, never stopped.
 func (s *embedServer) stopLocked() {
-	if s.adopted && s.proc == nil {
-		killProcs(nil, "llama-server.exe", "--port "+strconv.Itoa(ragPort))
-	}
 	s.adopted = false
 	if s.proc != nil && s.proc.Process != nil {
+		unregister(ragPort)
 		if isWin {
 			quietCmd("taskkill", "/PID", strconv.Itoa(s.proc.Process.Pid), "/T", "/F").Run()
 		} else {

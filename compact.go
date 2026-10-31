@@ -287,7 +287,7 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		return compactJob([]map[string]any{st}, a)
 	}
 	if _, isModel := models()[c]; isModel {
-		out, err := useModel(c, modelLoadWait)
+		out, err := useModel(c, modelLoadWait, a["force"] == true)
 		if err == nil {
 			out += syncFrontends()
 		}
@@ -481,7 +481,7 @@ func compactHelp(c string) string {
 	case "edit":
 		return "edit{path,find,replace,all,count,regex}: find must match once (copy it exactly, with a neighbour line if needed); returns changed lines. Or edits:[{find,replace}], or append:text."
 	case "model":
-		return "model{action:list|use|stop,name}: list = models and which is loaded; use name=" + strings.Join(modelNames(), "|") + " loads it on port 8080 (the chat pauses until it's loaded); stop unloads it."
+		return "model{action:list|use|stop|pin|unpin|idle,name,force,minutes}: list = models, which is loaded, server owner/busy/idle; use name=" + strings.Join(modelNames(), "|") + " loads it on port 8080; stop unloads it. A server ContextSaver didn't start or that is busy is never stopped (force:true for an idle external one); pin keeps it on; idle minutes = auto-stop delay."
 	case "help":
 		return "help{c,full}: short args for command c; full:true = every option. No c = the command list."
 	case "more":

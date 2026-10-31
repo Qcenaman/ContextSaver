@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,8 @@ func instructions() string {
 
 func serveMCP(in io.Reader, out io.Writer) {
 	resumeNotifier()
+	wctx, stopWatcher := context.WithCancel(context.Background())
+	startIdleWatcher(wctx)
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 1<<20), 64<<20)
 	var wmu sync.Mutex
@@ -66,7 +69,11 @@ func serveMCP(in io.Reader, out io.Writer) {
 	}
 	wg.Wait()
 	waitAllJobs()
+	stopWatcher()
+	// On exit only servers ContextSaver started that are idle, unbusy and unpinned stop;
+	// everything else keeps running for RemoteAI and other tools.
 	embedSrv.shutdown()
+	idleSweep()
 }
 
 // mcpSend writes a message to the client (set while serving).
