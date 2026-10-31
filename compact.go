@@ -21,7 +21,7 @@ import (
 const compactDesc = `Controls the user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths.
 open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action,path} rag{query|text} sys{action} model{name} more{id}
 git{action:status|commit|push|ci,path,message} check{path} lints, check{path,action:build} builds+tests (not run); plan{set|done|show}
-Also: files job saved browser window media. phone{action,repo} = user's phone, not adb. help{c} = all args.`
+Also: files job saved browser window media. phone{action:install,app}=user's phone, not adb. help{c}=all args.`
 
 // clineDesc: with "mcp --for cline" only what Cline lacks is advertised (Cline has its
 // own read/write/edit/run/find/browser); every command still works.
@@ -694,8 +694,8 @@ var shortHelp = map[string]string{
 	"phone":   phoneHelp,
 }
 
-const phoneHelp = `phone{action}: the user's Android phone. status (route, engine, battery) | apps{filter} | launch{package} | uninstall{package} | install: one of path (.apk on the PC), url (direct .apk link), repo (owner/name, newest release; tag optional); test:true for debug builds, replace (default true). The user approves installs/uninstalls in RemoteAI.
-e.g. {"action":"install","repo":"Qcenaman/AdbSaver"}`
+const phoneHelp = `phone{action}: the user's Android phone (no adb needed). status (route, engine, battery) | apps{filter} | launch{app or package} | uninstall{app or package} | install: app (name of one of the user's own apps, from its GitHub releases), or repo (owner/name; tag optional), url (direct .apk link), path (.apk on the PC); test:true for debug builds. The user approves installs/uninstalls in RemoteAI; just call it.
+e.g. {"action":"install","app":"AdbSaver"}`
 
 var helpKey = map[string]string{"scan": "ls", "system": "sys", "local_ai": "ai", "run_job": "files", "find": "find", "read": "read", "run": "run", "web": "web", "office": "office", "rag": "rag", "job": "job", "saved": "saved", "browser": "browser", "window": "window", "media": "media", "git": "git", "check": "check"}
 

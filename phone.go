@@ -219,6 +219,41 @@ func phoneAdbSerial(c phoneConf) (string, error) {
 	return "", errors.New("no phone reachable over adb (not on the LAN, or wireless debugging off)")
 }
 
+// phoneResolvePackage: a package name as given, or an installed app found by name.
+func phoneResolvePackage(c phoneConf, a map[string]any) (string, error) {
+	pkg, err := phonePackage(a)
+	if err == nil {
+		return pkg, nil
+	}
+	name := strings.ToLower(phoneAppName(a))
+	if name == "" {
+		return "", err
+	}
+	list, lerr := phoneApps(c, "")
+	if lerr != nil {
+		return "", lerr
+	}
+	var hits []string
+	for _, l := range strings.Split(list, "\n") {
+		if !strings.Contains(strings.ToLower(l), strings.ReplaceAll(name, " ", "")) {
+			continue
+		}
+		for _, f := range strings.FieldsFunc(l, func(r rune) bool { return r == ' ' || r == '\t' || r == '(' || r == ')' || r == ',' || r == '=' || r == ':' }) {
+			if pkgRe.MatchString(f) {
+				hits = append(hits, f)
+				break
+			}
+		}
+	}
+	switch len(hits) {
+	case 1:
+		return hits[0], nil
+	case 0:
+		return "", fmt.Errorf("no installed app matches %q; apps{filter} lists them", name)
+	}
+	return "", fmt.Errorf("%q matches several apps, give package: %s", name, strings.Join(hits, ", "))
+}
+
 var pkgRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$`)
 
 func phonePackage(a map[string]any) (string, error) {
@@ -235,24 +270,56 @@ func phonePackage(a map[string]any) (string, error) {
 // ---------- command ----------
 
 // phoneAction: the action a phone call will do (status when nothing says otherwise).
+// Models guess action names (install_app, open_app, list_apps...), so match loosely.
 func phoneAction(a map[string]any) string {
 	act := strings.ToLower(strings.TrimSpace(str(a, "action")))
-	switch act {
-	case "list", "packages", "app":
-		return "apps"
-	case "remove", "delete":
-		return "uninstall"
-	case "open", "start", "run":
-		return "launch"
-	case "add":
-		return "install"
-	case "":
-		if str(a, "path", "file", "apk", "url", "repo") != "" {
+	switch {
+	case act == "":
+		if str(a, "path", "file", "apk", "url", "repo", "app", "name", "app_name") != "" {
 			return "install"
 		}
 		return "status"
+	case strings.Contains(act, "uninstall") || strings.Contains(act, "remove") || strings.Contains(act, "delete"):
+		return "uninstall"
+	case strings.Contains(act, "install") || act == "add" || strings.Contains(act, "update"):
+		return "install"
+	case strings.Contains(act, "launch") || strings.Contains(act, "open") || strings.Contains(act, "start") || act == "run":
+		return "launch"
+	case strings.Contains(act, "list") || strings.Contains(act, "apps") || strings.Contains(act, "packages") || act == "app":
+		return "apps"
+	case strings.Contains(act, "status") || strings.Contains(act, "info") || strings.Contains(act, "battery"):
+		return "status"
 	}
 	return act
+}
+
+// phoneAppName: an app given by name (app/name), for install from the user's own repo.
+func phoneAppName(a map[string]any) string {
+	return strings.TrimSpace(str(a, "app", "name", "app_name", "package"))
+}
+
+// ghOwner: the signed-in GitHub user (a var so tests can fake it).
+var ghOwner = func() string {
+	if githubToken() == "" {
+		return ""
+	}
+	b, code, err := ghAPI("GET", "/user", nil)
+	if err != nil || code != 200 {
+		return ""
+	}
+	var u struct{ Login string }
+	json.Unmarshal(b, &u)
+	return u.Login
+}
+
+var (
+	ownerOnce sync.Once
+	ownerName string
+)
+
+func myGitHub() string {
+	ownerOnce.Do(func() { ownerName = ghOwner() })
+	return ownerName
 }
 
 func toolPhoneCmd(a map[string]any) (string, error) {
@@ -264,18 +331,12 @@ func toolPhoneCmd(a map[string]any) (string, error) {
 		return phoneApps(c, strings.ToLower(str(a, "filter", "query", "package", "name")))
 	case "install":
 		return phoneInstall(c, a)
-	case "uninstall":
-		pkg, err := phonePackage(a)
+	case "uninstall", "launch":
+		pkg, err := phoneResolvePackage(c, a)
 		if err != nil {
 			return "", err
 		}
-		return phonePkgAction(c, "uninstall", pkg)
-	case "launch":
-		pkg, err := phonePackage(a)
-		if err != nil {
-			return "", err
-		}
-		return phonePkgAction(c, "launch", pkg)
+		return phonePkgAction(c, phoneAction(a), pkg)
 	}
 	return "", fmt.Errorf("unknown phone action %q: status apps install uninstall launch", str(a, "action"))
 }
@@ -411,8 +472,18 @@ func phoneSource(a map[string]any) (kind, val string, err error) {
 			kind, val = k.kind, v
 		}
 	}
+	if n == 0 {
+		// just an app name: the user's own GitHub repo of that name
+		if name := phoneAppName(a); name != "" && !strings.ContainsAny(name, `\:`) {
+			if strings.Contains(name, "/") {
+				kind, val, n = "repo", name, 1
+			} else if owner := myGitHub(); owner != "" {
+				kind, val, n = "repo", owner+"/"+strings.ReplaceAll(name, " ", ""), 1
+			}
+		}
+	}
 	if n != 1 {
-		return "", "", errors.New(`install needs exactly one of path (an .apk on the PC), url (a direct .apk link) or repo ("owner/name", newest GitHub release; tag optional)`)
+		return "", "", errors.New(`install needs exactly one of app (name of one of the user's own GitHub apps, e.g. "AdbSaver"), repo ("owner/name"), url (a direct .apk link) or path (an .apk on the PC)`)
 	}
 	if kind == "repo" {
 		val = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(val, "https://"), "github.com/"), ".git")

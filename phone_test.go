@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -233,8 +234,33 @@ func TestAdbRunNudge(t *testing.T) {
 			t.Errorf("nudge for %q", c)
 		}
 	}
-	if !strings.Contains(compactDesc, "phone{action,repo}") {
+	if !strings.Contains(compactDesc, "phone{action:install,app}") {
 		t.Fatal("pc description doesn't point at phone")
+	}
+}
+
+func TestPhoneLooseArgs(t *testing.T) {
+	cases := map[string]string{"install_app": "install", "Install": "install", "update": "install", "uninstall_app": "uninstall", "remove": "uninstall",
+		"open_app": "launch", "launch": "launch", "list_apps": "apps", "apps": "apps", "status": "status", "battery": "status"}
+	for in, want := range cases {
+		if got := phoneAction(map[string]any{"action": in}); got != want {
+			t.Errorf("%s -> %s, want %s", in, got, want)
+		}
+	}
+	if phoneAction(map[string]any{"app": "AdbSaver"}) != "install" || phoneAction(map[string]any{}) != "status" {
+		t.Fatal("default action")
+	}
+	old := ghOwner
+	t.Cleanup(func() { ghOwner = old; ownerOnce = sync.Once{}; ownerName = "" })
+	ownerOnce, ownerName = sync.Once{}, ""
+	ghOwner = func() string { return "Qcenaman" }
+	for _, a := range []map[string]any{{"action": "install_app", "name": "AdbSaver"}, {"action": "install", "app": "AdbSaver"}, {"app": "Qcenaman/AdbSaver"}} {
+		if k, v, err := phoneSource(a); err != nil || k != "repo" || v != "Qcenaman/AdbSaver" {
+			t.Errorf("%v -> %s %s %v", a, k, v, err)
+		}
+	}
+	if _, _, err := phoneSource(map[string]any{"action": "install"}); err == nil || !strings.Contains(err.Error(), "app") {
+		t.Fatalf("no source: %v", err)
 	}
 }
 
