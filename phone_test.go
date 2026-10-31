@@ -222,6 +222,22 @@ func TestInstallViaFakeEngine(t *testing.T) {
 	}
 }
 
+func TestAdbRunNudge(t *testing.T) {
+	for _, c := range []string{"adb devices", "adb install -r x.apk", `"C:\tools\adb.exe" devices`, "cd D:\\x && adb shell pm list packages"} {
+		if !adbHint(c) {
+			t.Errorf("no nudge for %q", c)
+		}
+	}
+	for _, c := range []string{"dir D:\\", "go test ./...", "type adbsaver.txt", "git -C D:\\AdbSaver status"} {
+		if adbHint(c) {
+			t.Errorf("nudge for %q", c)
+		}
+	}
+	if !strings.Contains(compactDesc, "phone{action,repo}") {
+		t.Fatal("pc description doesn't point at phone")
+	}
+}
+
 func TestInstallErrorHints(t *testing.T) {
 	if e := installErr(errorString("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: ...]")); !strings.Contains(e.Error(), "uninstalled first") {
 		t.Fatal(e)

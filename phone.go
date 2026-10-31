@@ -33,6 +33,14 @@ import (
 	"archive/zip"
 )
 
+// phoneNudge follows any run of adb: models reach for adb, but the phone command works
+// over Wi-Fi/Tailscale without it and handles the approval.
+const phoneNudge = `Note: for the user's phone use pc{c:"phone"} instead of adb, e.g. {"c":"phone","a":{"action":"install","repo":"Qcenaman/AdbSaver"}} or {"action":"status"}; it reaches the phone over Wi-Fi/Tailscale without adb.`
+
+var adbCmdRe = regexp.MustCompile(`(?i)(^|[\s"'\\/&|;(])adb(\.exe)?("|'|\s|$)`)
+
+func adbHint(cmd string) bool { return adbCmdRe.MatchString(cmd) }
+
 var phoneCommands = map[string]bool{"phone": true, "android": true, "install_app": true, "apk": true, "mobile": true}
 
 const (

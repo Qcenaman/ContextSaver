@@ -21,7 +21,7 @@ import (
 const compactDesc = `Controls the user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths.
 open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action,path} rag{query|text} sys{action} model{name} more{id}
 git{action:status|commit|push|ci,path,message} check{path} lints, check{path,action:build} builds+tests (not run); plan{set|done|show}
-Also: files job saved browser window media phone. help{c} = all args.`
+Also: files job saved browser window media. phone{action,repo} = user's phone, not adb. help{c} = all args.`
 
 // clineDesc: with "mcp --for cline" only what Cline lacks is advertised (Cline has its
 // own read/write/edit/run/find/browser); every command still works.
@@ -299,6 +299,13 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 	}
 	if err == nil && name == "run" {
 		out = trimRunOut(out)
+	}
+	if name == "run" && adbHint(str(a, "command")) {
+		if err != nil {
+			err = errors.New(err.Error() + "\n" + phoneNudge)
+		} else {
+			out += "\n" + phoneNudge
+		}
 	}
 	if err == nil {
 		out = logLineRe.ReplaceAllString(out, "")
