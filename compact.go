@@ -21,7 +21,8 @@ import (
 const compactDesc = `Controls the user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths.
 open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action,path} rag{query|text} sys{action} model{name} more{id}
 git{action:status|commit|push|ci,path,message} check{path} lints, check{path,action:build} builds+tests (not run); plan{set|done|show}
-Also: files job saved browser window media. phone{action:install,app}=user's phone, not adb. help{c}=all args.`
+Also: files job saved browser window media. phone{action:install,app}=user's phone, not adb. help{c}=all args.
+The user's own apps (AdbSaver RemoteAI TokenSaver...) are in D:\Claude Apps + github Qcenaman/<name>: never web-search them. me = about the user.`
 
 // clineDesc: with "mcp --for cline" only what Cline lacks is advertised (Cline has its
 // own read/write/edit/run/find/browser); every command still works.
@@ -50,7 +51,7 @@ func setProfile(p string) {
 // compactCommands is the one list of canonical pc commands. The schema enum, the
 // unknown-c error and the tests are built from it so they can't drift apart.
 // Aliases in compactAlias (and model names) still work for models that ignore the enum.
-var compactCommands = []string{"open", "find", "ls", "read", "write", "edit", "run", "web", "ai", "office", "rag", "sys", "model", "more", "help", "files", "job", "saved", "browser", "window", "media", "git", "check", "plan", "phone"}
+var compactCommands = []string{"open", "find", "ls", "read", "write", "edit", "run", "web", "ai", "office", "rag", "sys", "model", "more", "help", "files", "job", "saved", "browser", "window", "media", "git", "check", "plan", "phone", "me"}
 
 var compactTool = buildCompactTool()
 
@@ -216,6 +217,8 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 	case "phone", "android", "install_app", "apk", "mobile":
 		out, err := toolPhoneCmd(a)
 		return out, nil, err
+	case "me", "about", "user", "whoami":
+		return aboutCard(), nil, nil
 	case "remember":
 		a["action"] = "remember"
 		fixArgs("rag", a)
@@ -478,6 +481,10 @@ func compactHelp(c string) string {
 	}
 	if phoneCommands[strings.ToLower(c)] {
 		return phoneHelp
+	}
+	switch strings.ToLower(c) {
+	case "me", "about", "user", "whoami":
+		return "me{}: who the user is, his own apps and how he wants things done (data\\about.md); details: rag{query,tag:\"about\"}."
 	}
 	name, ok := compactAlias[strings.ToLower(c)]
 	if !ok {

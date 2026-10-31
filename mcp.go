@@ -27,7 +27,7 @@ const serverInstructions = `ContextSaver works on this Windows PC and returns sh
 
 func instructions() string {
 	if localMode {
-		return localInstructions
+		return localInstructions + "\n" + aboutCard()
 	}
 	return serverInstructions
 }
