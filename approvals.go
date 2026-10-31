@@ -40,7 +40,7 @@ var spawnApprovals = spawnApprovalServer
 // clients). Cline and AnythingLLM show the chat to the user, so they keep the in-chat
 // confirm. approval_exempt_clients overrides the exempt list.
 func approvalMode() bool {
-	if m := strings.ToLower(strings.TrimSpace(cfg.Approval)); m != "client" && m != "wait" {
+	if m := strings.ToLower(strings.TrimSpace(cfg.Approval)); m != "client" && m != "wait" && m != "dangerous" {
 		return false
 	}
 	name := strings.ToLower(clientName())

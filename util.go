@@ -31,7 +31,7 @@ type Config struct {
 	Models              map[string]string `json:"models,omitempty"`
 	MaxOut              int               `json:"max_out,omitempty"`
 	Frontend            string            `json:"frontend,omitempty"`       // anythingllm | lmstudio; empty = AnythingLLM if installed
-	Approval            string            `json:"approval,omitempty"`       // "client": risky calls wait for approval in RemoteAI
+	Approval            string            `json:"approval,omitempty"`       // "dangerous" (default): only dangerous calls wait in RemoteAI; "wait"/"client": every risky call; "confirm": in-chat token
 	ApprovalToken       string            `json:"approval_token,omitempty"` // the approval server's bearer token
 	ApprovalPort        int               `json:"approval_port,omitempty"`  // default 1235
 	LMSToken            string            `json:"lms_token,omitempty"`
@@ -76,6 +76,9 @@ func initApp() {
 	}
 	if cfg.Workers <= 0 {
 		cfg.Workers = 4
+	}
+	if strings.TrimSpace(cfg.Approval) == "" {
+		cfg.Approval = "dangerous" // only deleting/uninstalling/system changes ask
 	}
 	if cfg.AIScript == "" && isWin {
 		cfg.AIScript = defaultAIScript

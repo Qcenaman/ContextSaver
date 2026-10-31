@@ -151,6 +151,9 @@ func callCompactP(raw json.RawMessage, progress func(string)) (string, []toolIma
 		// confirm:"<token>" is the user's approval for a risky call.
 		guard, _ := args["confirm"].(bool)
 		delete(args, "confirm")
+		// run's confirmed:true (lets the admin helper run a destructive command) is set
+		// only by an approval below, never by the model
+		delete(args, "confirmed")
 		confirmed, note := false, ""
 		if guard {
 			args["confirm"] = true
@@ -164,7 +167,8 @@ func callCompactP(raw json.RawMessage, progress func(string)) (string, []toolIma
 		if note != "" { // a pending or denied approval for exactly this call
 			return note, nil, nil
 		}
-		if what := riskyAction(c, args); what != "" && !confirmed {
+		approved := confirmed
+		if what := approvalAction(c, args); what != "" && !confirmed {
 			if confirm == "" && approvalKind() == "wait" {
 				if ok, msg := waitApproval(c, args, what, progress); !ok {
 					return msg, nil, nil
@@ -175,6 +179,10 @@ func callCompactP(raw json.RawMessage, progress func(string)) (string, []toolIma
 				}
 				return askApproval(c, args, what, n), nil, nil
 			}
+			approved = true
+		}
+		if approved && (c == "run" || compactAlias[c] == "run") {
+			args["confirmed"] = true
 		}
 	}
 	out, imgs, err := runLimited(start, func() (string, []toolImage, error) { return compactDispatch(c, args) })

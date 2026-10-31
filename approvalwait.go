@@ -19,8 +19,8 @@ func approvalKind() string {
 	if !approvalMode() {
 		return ""
 	}
-	if strings.EqualFold(strings.TrimSpace(cfg.Approval), "wait") {
-		return "wait"
+	if m := strings.ToLower(strings.TrimSpace(cfg.Approval)); m == "wait" || m == "dangerous" {
+		return "wait" // "dangerous" waits too, but only for dangerous calls (danger.go)
 	}
 	return "client"
 }
