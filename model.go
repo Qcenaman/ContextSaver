@@ -19,14 +19,14 @@ import (
 // AnythingLLM keeps talking to the same address whichever model is loaded.
 
 var defaultModels = map[string]string{
-	"qwen":     `D:\llama.cpp\start-qwen3.6-27b-nothink.bat`,
-	"oss":      `D:\llama.cpp\start-gpt-oss-120b.bat`,
+	"qwen": `D:\llama.cpp\start-qwen3.6-27b-nothink.bat`,
+	"oss":  `D:\llama.cpp\start-gpt-oss-120b.bat`,
 	// oss-fast (EAGLE3 SPEC) measured slower than plain gpt-oss with experts on the CPU,
 	// so it points to the plain script.
 	"oss-fast":   `D:\llama.cpp\start-gpt-oss-120b.bat`,
 	"gemma":      `D:\llama.cpp\start-gemma-4-31b.bat`,
 	"qwen-think": `D:\llama.cpp\start-qwen3.6-27b.bat`,
-	"oss-free": `D:\llama.cpp\start-gpt-oss-120b-derestricted.bat`,
+	"oss-free":   `D:\llama.cpp\start-gpt-oss-120b-derestricted.bat`,
 }
 
 func models() map[string]string {
@@ -214,6 +214,17 @@ const modelLoadWait = 60
 // with less they spill into shared memory and run ~5x slower.
 const bigModelVRAMGB = 31.0
 
+// lmsBigModelVRAMGB: in LM Studio Qwen loads at 196K and Gemma at 131K context (~30.4 GB
+// in use with the desktop's own share), leaving headroom for other apps' VRAM.
+const lmsBigModelVRAMGB = 29.0
+
+func bigModelNeedGB() float64 {
+	if useLMStudio() {
+		return lmsBigModelVRAMGB
+	}
+	return bigModelVRAMGB
+}
+
 func needsFullGPU(name, script string) bool {
 	x := strings.ToLower(name + " " + filepath.Base(script))
 	return strings.Contains(x, "qwen") || strings.Contains(x, "gemma")
@@ -231,12 +242,12 @@ func vramWarning(name, script string) string {
 		if !ok {
 			return ""
 		}
-		if free = f; free >= bigModelVRAMGB {
+		if free = f; free >= bigModelNeedGB() {
 			return ""
 		}
 		time.Sleep(time.Second)
 	}
-	w := fmt.Sprintf("; WARNING: only %.1f GB VRAM free, %s needs ~32 GB and will spill into shared memory (~5x slower)", free, name)
+	w := fmt.Sprintf("; WARNING: only %.1f GB VRAM free, %s needs ~%.0f GB and will spill into shared memory (~5-10x slower)", free, name, bigModelNeedGB())
 	if b := gpuBusy(); b != "" {
 		return w + ": " + b
 	}
