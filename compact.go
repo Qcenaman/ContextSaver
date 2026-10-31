@@ -107,8 +107,21 @@ func callCompact(raw json.RawMessage) (string, []toolImage, error) {
 		if confirm == "" {
 			confirm = jsonStr(top["confirm"])
 		}
+		// confirm:true (a bool) is a tool argument, e.g. overriding the rag index guards;
+		// confirm:"<token>" is the user's approval for a risky call.
+		guard, _ := args["confirm"].(bool)
 		delete(args, "confirm")
-		if what := riskyAction(c, args); what != "" {
+		confirmed := false
+		if guard {
+			args["confirm"] = true
+		} else if confirm != "" {
+			// the token approved a call that had confirm:true; give it back
+			args["confirm"] = true
+			if confirmed = useConfirm(confirm, c, args); !confirmed {
+				delete(args, "confirm")
+			}
+		}
+		if what := riskyAction(c, args); what != "" && !confirmed {
 			if !useConfirm(confirm, c, args) {
 				return "CONFIRM " + newConfirm(c, args) + ": " + what + "; ask the user, then call again with the same args plus confirm:<token>", nil, nil
 			}

@@ -135,6 +135,9 @@ func riskyAction(c string, a map[string]any) string {
 			return "undo job " + str(a, "id")
 		}
 	case "rag":
+		if b, _ := a["confirm"].(bool); b {
+			return "override the RAG index guard (" + act + "): " + args()
+		}
 		if act == "forget" {
 			return "forget notes " + args()
 		}

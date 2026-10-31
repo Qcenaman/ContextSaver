@@ -81,10 +81,7 @@ func loadRagConfig() ragConfig {
 	return c
 }
 
-func saveRagConfig(c ragConfig) error {
-	os.MkdirAll(ragDir(), 0o755)
-	return writeJSONAtomic(filepath.Join(ragDir(), "config.json"), c)
-}
+// saveRagConfig: see rag_guard.go (keeps backups, refuses temp roots for the real index).
 
 // ---------- what gets indexed ----------
 
@@ -789,10 +786,11 @@ func splitChunks(name, t string) []ragPiece {
 // ---------- update (a background job) ----------
 
 type ragRequest struct {
-	Paths  []string `json:"paths,omitempty"`
-	DryRun bool     `json:"dry_run,omitempty"`
-	CPU    bool     `json:"cpu,omitempty"`
-	Busy   string   `json:"busy,omitempty"` // set when the CPU was chosen because the GPU is busy
+	Paths   []string `json:"paths,omitempty"`
+	DryRun  bool     `json:"dry_run,omitempty"`
+	CPU     bool     `json:"cpu,omitempty"`
+	Confirm bool     `json:"confirm,omitempty"` // allow dropping over half the index
+	Busy    string   `json:"busy,omitempty"`    // set when the CPU was chosen because the GPU is busy
 }
 
 func runRagUpdate(j *Job) error {
@@ -808,6 +806,11 @@ func runRagUpdate(j *Job) error {
 				return err
 			}
 			roots = append(roots, ep)
+		}
+	}
+	if !partial && !req.Confirm {
+		if err := ragRootsTempCheck(roots, ragDir()); err != nil {
+			return err
 		}
 	}
 	j.setCurrent("listing files on " + strings.Join(roots, ", ") + "…")
@@ -861,8 +864,21 @@ func runRagUpdate(j *Job) error {
 	res.Counts = map[string]int{"files": len(cands), "unchanged": kept, "to index": len(todo), "removed": removed}
 	res.Order = []string{"files", "unchanged", "to index", "removed"}
 	res.mu.Unlock()
+	oldN := 0
+	if old != nil {
+		oldN = len(old.meta.Files)
+	}
+	mass := ragMassRemoval(removed, oldN)
 	if req.DryRun {
-		j.setOutput(ragPlanText(cands, todo, bytesTodo))
+		out := ragPlanText(cands, todo, bytesTodo)
+		if mass {
+			out = ragMassRemovalText(removed, oldN, c.Roots, true) + "\n\n" + out
+		}
+		j.setOutput(out)
+		return nil
+	}
+	if mass && !req.Confirm {
+		j.setOutput(ragMassRemovalText(removed, oldN, c.Roots, false))
 		return nil
 	}
 	if req.Busy != "" && bytesTodo > 100<<20 {
@@ -1556,6 +1572,7 @@ func toolRag(raw json.RawMessage) (string, error) {
 		Types   []string `json:"types"`
 		Limit   int      `json:"limit"`
 		DryRun  bool     `json:"dry_run"`
+		Confirm bool     `json:"confirm"`
 		Notify  bool     `json:"notify"`
 		Wait    *int     `json:"wait_seconds"`
 	}
@@ -1577,6 +1594,11 @@ func toolRag(raw json.RawMessage) (string, error) {
 	case "config":
 		c := loadRagConfig()
 		if len(a.Roots) > 0 {
+			if !a.Confirm {
+				if err := ragRootsReplaceCheck(ragSavedRoots(), a.Roots); err != nil {
+					return "", err
+				}
+			}
 			c.Roots = a.Roots
 		}
 		if a.Types != nil {
@@ -1596,7 +1618,7 @@ func toolRag(raw json.RawMessage) (string, error) {
 			}
 			c.Exclude = keep
 		}
-		if err := saveRagConfig(c); err != nil {
+		if err := saveRagConfigOpt(c, a.Confirm); err != nil {
 			return "", err
 		}
 		return ragStatus(), nil
@@ -1613,7 +1635,7 @@ func toolRag(raw json.RawMessage) (string, error) {
 				cpuNote, busyNote = "Indexing on the CPU (slower, no clash) because the GPU is busy: "+busy+"\n", busy
 			}
 		}
-		j, err := newJob(JobSpec{Name: "rag update", Kind: "rag", DryRun: a.DryRun, Source: "chat", Rag: &ragRequest{Paths: a.Paths, DryRun: a.DryRun, CPU: a.CPU, Busy: busyNote}})
+		j, err := newJob(JobSpec{Name: "rag update", Kind: "rag", DryRun: a.DryRun, Source: "chat", Rag: &ragRequest{Paths: a.Paths, DryRun: a.DryRun, CPU: a.CPU, Busy: busyNote, Confirm: a.Confirm}})
 		if err != nil {
 			return "", err
 		}
