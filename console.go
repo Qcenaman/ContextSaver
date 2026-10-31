@@ -252,6 +252,9 @@ func consoleInstall() {
 	os.MkdirAll(jobsFolder(), 0o755)
 	os.WriteFile(filepath.Join(jobsFolder(), "Open ContextSaver.cmd"), []byte("@\""+target+"\"\r\n"), 0o644)
 	writeModelShortcuts(target)
+	if n := syncFrontends(); n != "" {
+		fmt.Println(strings.TrimPrefix(n, "; "))
+	}
 	writeDesktopShortcuts(target)
 	fmt.Println("\nAll set. In AnythingLLM open Agent Skills and refresh the MCP servers (or restart AnythingLLM).")
 	fmt.Println("Everything ContextSaver keeps is in", appRoot())

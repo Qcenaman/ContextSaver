@@ -74,8 +74,13 @@ func handleRPC(req rpcReq) map[string]any {
 	case "initialize":
 		var p struct {
 			ProtocolVersion string `json:"protocolVersion"`
+			ClientInfo      struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"clientInfo"`
 		}
 		json.Unmarshal(req.Params, &p)
+		noteClient(p.ClientInfo.Name, p.ClientInfo.Version)
 		v := p.ProtocolVersion
 		if v == "" {
 			v = "2025-06-18"
@@ -158,6 +163,18 @@ func callTool(name string, args json.RawMessage) (out string, imgs []toolImage, 
 		out, err = toolBrowser(args)
 	case "media":
 		out, err = toolMedia(args)
+	case "git":
+		out, err = toolGit(args)
+	case "check":
+		var ca struct {
+			Action string `json:"action"`
+		}
+		json.Unmarshal(args, &ca)
+		if ca.Action == "build" {
+			out, err = toolBuild(args)
+		} else {
+			out, err = toolCodeCheck(args)
+		}
 	case "office":
 		out, err = toolOffice(args)
 	case "rag":
@@ -220,6 +237,12 @@ func toolJob(raw json.RawMessage) (string, error) {
 	switch strings.ToLower(a.Action) {
 	case "list":
 		return listJobs(15), nil
+	case "log", "tail":
+		id, err := resolveJobID(a.ID)
+		if err != nil {
+			return "", err
+		}
+		return jobLog(id, 60)
 	case "cancel":
 		id, err := resolveJobID(a.ID)
 		if err != nil {
@@ -366,6 +389,8 @@ func toolLocalAI(raw json.RawMessage) (string, error) {
 }
 
 var toolDefs = []json.RawMessage{
+	json.RawMessage(`{"name":"git","description":"Git on the PC in one call, never as admin, GitHub sign-in goes straight to the browser. path = repo folder. status (branch, changes, last commits, last tag), log (n, ref, paths), diff (ref e.g. v1.0..HEAD or empty for working tree; full:true adds the text, max_chars), commit (message; paths or everything; full:true also pushes), push (sets upstream if missing), pull (--ff-only), clone (url or owner/name, to, ref), release (version: bumps main.go appVersion / package.json / pyproject / build.gradle, puts notes under What's new in FUNCTIONS.md, commits 'version: message' and pushes; no_push, dry_run), handoff (notes for another project from commits+diff since ref or last tag, summarized by the local AI; to = file to write; message = extra context).","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["status","log","diff","commit","push","pull","clone","release","handoff"]},"path":{"type":"string"},"message":{"type":"string"},"ref":{"type":"string"},"url":{"type":"string"},"to":{"type":"string"},"version":{"type":"string"},"notes":{"type":"array","items":{"type":"string"}},"paths":{"type":"array","items":{"type":"string"}},"n":{"type":"integer"},"full":{"type":"boolean"},"no_push":{"type":"boolean"},"dry_run":{"type":"boolean"},"max_chars":{"type":"integer"},"wait_seconds":{"type":"integer"}},"required":["action","path"]}}`),
+	json.RawMessage(`{"name":"check","description":"Lint and type-check code with Ruff + mypy (Python), ESLint + tsc (JS/TS), go vet + staticcheck (Go modules) and Android lint (Gradle projects, Kotlin/Java), skipping gitignored files; returns issues as file:line:col tool code message. Run it on code Claude wrote or changed before handing it over. source: pc (default; path = file or folder), phone (path on the phone, e.g. /sdcard/Projects/app, pulled over ADB; device: IP:port to connect wirelessly), repo (path = owner/name or git URL; ref = branch or tag; shallow clone). Uses the project's own ESLint config, tsconfig, ruff and mypy settings when present, strict defaults otherwise. fix:true applies safe autofixes (for phone or repo only to the local copy). only: python|js|go|android. max: issues shown (40). action:setup installs or updates the tools (also done on first use). action:build compiles and tests the project at path (go build -trimpath + go test, npm run build + npm test, gradlew assembleDebug + unit tests, python compileall + pytest) and returns only the failing lines; no_test:true skips tests.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["check","setup","build"]},"source":{"type":"string","enum":["pc","phone","repo"]},"path":{"type":"string"},"ref":{"type":"string"},"device":{"type":"string"},"fix":{"type":"boolean"},"only":{"type":"string","enum":["python","js","go","android"]},"max":{"type":"integer"}}}}`),
 	json.RawMessage(`{"name":"scan","description":"Folder overview: file count, size, types, dates, largest files, subfolders. Use instead of listing.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"},"include":{"type":"string"},"exclude":{"type":"string"}},"required":["path"]}}`),
 	json.RawMessage(`{"name":"find","description":"Find files by name, size, date and/or text inside (text, code, Office, PDF) in many folders at once; returns matches with up to lines (3) matching lines per file and a count of the rest. all:true also searches cache folders.","inputSchema":{"type":"object","properties":{"path":{"type":"array","items":{"type":"string"}},"name":{"type":"string"},"text":{"type":"string"},"regex":{"type":"boolean"},"case_sensitive":{"type":"boolean"},"include":{"type":"string"},"exclude":{"type":"string"},"min_size":{"type":"string"},"max_size":{"type":"string"},"newer_than":{"type":"string"},"older_than":{"type":"string"},"recursive":{"type":"boolean"},"limit":{"type":"integer"},"lines":{"type":"integer"},"all":{"type":"boolean"}},"required":["path"]}}`),
 	json.RawMessage(`{"name":"read","description":"Read part of a file: info, head, tail, lines, grep, text (Office/HTML/PDF as text; scans and pictures via OCR). pages: PDF pages, e.g. 3-5. image: small copy of a picture or PDF page (max_px, default 800). values: values of keys in JSON files plus strings ending in ext (e.g. a ComfyUI workflow's nodes and models). changes:true: only lines new or gone since your last changes read.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"mode":{"type":"string","enum":["info","head","tail","lines","grep","text","image","values"]},"lines":{"type":"integer"},"from_line":{"type":"integer"},"pattern":{"type":"string"},"regex":{"type":"boolean"},"context":{"type":"integer"},"max_chars":{"type":"integer"},"keys":{"type":"array","items":{"type":"string"}},"ext":{"type":"string"},"pages":{"type":"string"},"max_px":{"type":"integer"},"changes":{"type":"boolean"}},"required":["path"]}}`),

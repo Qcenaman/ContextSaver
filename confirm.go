@@ -107,6 +107,14 @@ func riskyAction(c string, a map[string]any) string {
 		return "run command: " + short(str(a, "command", "cmd", "c", "script"))
 	case "run_job":
 		return riskySteps(a)
+	case "git":
+		if act == "push" {
+			return "git push " + str(a, "path")
+		}
+	case "check":
+		if act == "build" {
+			return "build and run the tests of " + str(a, "path")
+		}
 	case "system":
 		if act == "kill" {
 			return "kill processes " + args()

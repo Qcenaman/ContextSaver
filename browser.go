@@ -332,10 +332,9 @@ func toolBrowser(raw json.RawMessage) (string, error) {
 		}
 		time.Sleep(400 * time.Millisecond)
 	}
+	armErrors(w)
 	if a.URL != "" {
-		if !strings.Contains(a.URL, "://") {
-			a.URL = "https://" + a.URL
-		}
+		a.URL = fixURL(a.URL)
 		if _, err := w.call("Page.navigate", map[string]any{"url": a.URL}, 30*time.Second); err != nil {
 			return "", err
 		}
@@ -347,6 +346,8 @@ func toolBrowser(raw json.RawMessage) (string, error) {
 		return t
 	}
 	switch act {
+	case "console", "errors":
+		return pageErrors(w)
 	case "open", "", "text":
 		t, err := w.eval("document.body ? document.body.innerText : ''", 15*time.Second)
 		if err != nil {

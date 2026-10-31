@@ -136,7 +136,11 @@ func toolModel(a map[string]any) (string, error) {
 	case "list", "status":
 		return modelStatus(), nil
 	case "use", "load", "switch":
-		return useModel(name, modelLoadWait)
+		out, err := useModel(name, modelLoadWait)
+		if err == nil {
+			out += syncFrontends()
+		}
+		return out, err
 	case "stop", "unload":
 		return stopModel(), nil
 	}
@@ -359,7 +363,7 @@ func consoleModel(args []string) int {
 		waitEnter("Press Enter to close.", 0)
 		return 1
 	}
-	fmt.Println(out)
+	fmt.Println(out + syncFrontends())
 	return 0
 }
 

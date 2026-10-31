@@ -36,9 +36,10 @@ var lmsNames = map[string]string{
 }
 
 type lmsModel struct {
-	ID    string `json:"id"`
-	Type  string `json:"type"`
-	State string `json:"state"`
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	State     string `json:"state"`
+	LoadedCtx int    `json:"loaded_context_length"`
 }
 
 // useLMStudio: LM Studio is the chosen front end.

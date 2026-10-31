@@ -22,22 +22,24 @@ const isWin = runtime.GOOS == "windows"
 const defaultAIScript = `D:\llama.cpp\start-qwen3.6-27b-nothink.bat`
 
 type Config struct {
-	Workers       int               `json:"workers,omitempty"`
-	ExtraBlocked  []string          `json:"extra_blocked,omitempty"`
-	AIScript      string            `json:"ai_script,omitempty"`
-	AIEndpoint    string            `json:"ai_endpoint,omitempty"`
-	AIModel       string            `json:"ai_model,omitempty"`
-	NotifyRepo    string            `json:"notify_repo,omitempty"`
-	Models        map[string]string `json:"models,omitempty"`
-	MaxOut        int               `json:"max_out,omitempty"`
-	Frontend      string            `json:"frontend,omitempty"`       // anythingllm | lmstudio; empty = AnythingLLM if installed
-	Approval      string            `json:"approval,omitempty"`       // "client": risky calls wait for approval in RemoteAI
-	ApprovalToken string            `json:"approval_token,omitempty"` // the approval server's bearer token
-	ApprovalPort  int               `json:"approval_port,omitempty"`  // default 1235
-	LMSToken      string            `json:"lms_token,omitempty"`
-	LMSBind       string            `json:"lms_bind,omitempty"`      // lms server start --bind (0.0.0.0 for RemoteAI over Tailscale)
-	ApprovalBind  string            `json:"approval_bind,omitempty"` // default 127.0.0.1; 0.0.0.0 for RemoteAI over Tailscale      // LM Studio API token for ContextSaver's own calls
-	RagDir        string            `json:"rag_dir,omitempty"`
+	Workers        int               `json:"workers,omitempty"`
+	ExtraBlocked   []string          `json:"extra_blocked,omitempty"`
+	AIScript       string            `json:"ai_script,omitempty"`
+	AIEndpoint     string            `json:"ai_endpoint,omitempty"`
+	AIModel        string            `json:"ai_model,omitempty"`
+	NotifyRepo     string            `json:"notify_repo,omitempty"`
+	Models         map[string]string `json:"models,omitempty"`
+	MaxOut         int               `json:"max_out,omitempty"`
+	Frontend       string            `json:"frontend,omitempty"`       // anythingllm | lmstudio; empty = AnythingLLM if installed
+	Approval       string            `json:"approval,omitempty"`       // "client": risky calls wait for approval in RemoteAI
+	ApprovalToken  string            `json:"approval_token,omitempty"` // the approval server's bearer token
+	ApprovalPort   int               `json:"approval_port,omitempty"`  // default 1235
+	LMSToken       string            `json:"lms_token,omitempty"`
+	ApprovalExempt []string          `json:"approval_exempt_clients,omitempty"` // MCP clients that keep the in-chat confirm (default cline, anythingllm)
+	ClineDir       string            `json:"cline_dir,omitempty"`               // Cline's CLINE_DIR (default: env CLINE_DIR)
+	LMSBind        string            `json:"lms_bind,omitempty"`                // lms server start --bind (0.0.0.0 for RemoteAI over Tailscale)
+	ApprovalBind   string            `json:"approval_bind,omitempty"`           // default 127.0.0.1; 0.0.0.0 for RemoteAI over Tailscale      // LM Studio API token for ContextSaver's own calls
+	RagDir         string            `json:"rag_dir,omitempty"`
 }
 
 var (

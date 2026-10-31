@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-const appVersion = "1.10.1"
+const appVersion = "1.11.0"
 
 func main() {
 	initApp()
@@ -24,6 +24,11 @@ func main() {
 	case "approvals":
 		os.Exit(consoleApprovals(args[1:]))
 	case "mcp":
+		for i := 1; i+1 < len(args); i++ {
+			if args[i] == "--for" {
+				setProfile(args[i+1])
+			}
+		}
 		serveMCP(os.Stdin, os.Stdout)
 	case "run":
 		if len(args) < 2 {

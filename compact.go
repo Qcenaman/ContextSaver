@@ -19,24 +19,51 @@ import (
 // disk and paged with c=more.
 
 const compactDesc = `Controls the user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths.
-open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action:create|edit|read|convert,path,content} rag{query|text} sys{action} model{name|action:list|stop} more{id}
+open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action,path} rag{query|text} sys{action} model{name} more{id}
+git{action:status|commit|push|ci,path,message} check{path} after code changes; plan{set|done|show}
 Also: files job saved browser window media. help{c} = all args.`
+
+// clineDesc: with "mcp --for cline" only what Cline lacks is advertised (Cline has its
+// own read/write/edit/run/find/browser); every command still works.
+const clineDesc = `The user's PC beyond Cline's own tools; you CAN act. c=command, a=args, absolute paths.
+git{action:status|diff|log|commit|push|pull|clone|ci,path,message} check{path,action:check|build} after every code change
+rag{query|text} office{action,path} web{query|url} ai{paths[],question} model{name}
+Also: window media sys saved job more. help{c} = all args.`
+
+var clineCommands = []string{"git", "check", "rag", "office", "web", "ai", "model", "window", "media", "sys", "saved", "job", "more", "help"}
+
+// The profile in use (set from "mcp --for <client>" before serving).
+var (
+	activeDesc     = compactDesc
+	activeCommands = compactCommands
+)
+
+func setProfile(p string) {
+	if strings.EqualFold(p, "cline") {
+		activeDesc, activeCommands = clineDesc, clineCommands
+	} else {
+		activeDesc, activeCommands = compactDesc, compactCommands
+	}
+	compactTool = buildCompactTool()
+}
 
 // compactCommands is the one list of canonical pc commands. The schema enum, the
 // unknown-c error and the tests are built from it so they can't drift apart.
 // Aliases in compactAlias (and model names) still work for models that ignore the enum.
-var compactCommands = []string{"open", "find", "ls", "read", "write", "edit", "run", "web", "ai", "office", "rag", "sys", "model", "more", "help", "files", "job", "saved", "browser", "window", "media"}
+var compactCommands = []string{"open", "find", "ls", "read", "write", "edit", "run", "web", "ai", "office", "rag", "sys", "model", "more", "help", "files", "job", "saved", "browser", "window", "media", "git", "check", "plan"}
 
 var compactTool = buildCompactTool()
 
-func buildCompactTool() json.RawMessage {
+func buildCompactTool() json.RawMessage { return buildCompactToolFor(activeDesc, activeCommands) }
+
+func buildCompactToolFor(desc string, commands []string) json.RawMessage {
 	b, _ := json.Marshal(map[string]any{
 		"name":        "pc",
-		"description": compactDesc,
+		"description": desc,
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"c": map[string]any{"type": "string", "enum": compactCommands},
+				"c": map[string]any{"type": "string", "enum": commands},
 				"a": map[string]any{"type": "object", "description": `args for c, e.g. {"path":"D:\x.txt"}`},
 			},
 			"required": []string{"c"},
@@ -57,6 +84,7 @@ var compactAlias = map[string]string{
 	"office": "office", "doc": "office", "word": "office", "excel": "office", "xlsx": "office", "docx": "office", "pptx": "office", "pdf": "office", "powerpoint": "office",
 	"rag": "rag", "memory": "rag", "notes": "rag",
 	"job": "job", "jobs": "job", "files": "run_job", "run_job": "run_job", "saved": "saved",
+	"git": "git", "check": "check", "lint": "check",
 }
 
 const defaultMaxOut = 1800
@@ -100,7 +128,7 @@ func callCompact(raw json.RawMessage) (string, []toolImage, error) {
 		}
 	}
 	if c == "" {
-		return "", nil, errors.New("give c (a command). " + firstLine(compactDesc))
+		return "", nil, errors.New("give c (a command). " + firstLine(activeDesc))
 	}
 	if localMode {
 		confirm := str(args, "confirm")
@@ -162,6 +190,8 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		return compactHelp(c), nil, nil
 	case "more", "next":
 		return moreOut(str(a, "id"), intArg(a, "from")), nil, nil
+	case "plan", "todo", "tasks":
+		return toolPlan(a), nil, nil
 	case "remember":
 		a["action"] = "remember"
 		fixArgs("rag", a)
@@ -205,6 +235,9 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 			if b, ok := a["regex"].(bool); ok {
 				ed["regex"] = b
 			}
+			if n := intArg(a, "count"); n > 0 {
+				ed["count"] = n
+			}
 			st["edits"] = []any{ed}
 		}
 		if ap, ok := a["append"].(string); ok {
@@ -213,10 +246,16 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		if st["edits"] == nil && st["append"] == nil {
 			return "", nil, errors.New("edit needs find+replace, edits[] or append")
 		}
+		if out, handled, err := codeEdit(p, st, a); handled {
+			return out, nil, err
+		}
 		return compactJob([]map[string]any{st}, a)
 	}
 	if _, isModel := models()[c]; isModel {
 		out, err := useModel(c, modelLoadWait)
+		if err == nil {
+			out += syncFrontends()
+		}
 		return out, nil, err
 	}
 	name, ok := compactAlias[c]
@@ -390,7 +429,7 @@ func trimRunOut(s string) string {
 
 func compactHelp(c string) string {
 	if c == "" {
-		return compactDesc
+		return activeDesc
 	}
 	switch strings.ToLower(c) {
 	case "open":
@@ -398,7 +437,7 @@ func compactHelp(c string) string {
 	case "write":
 		return "write{path,content}: create or replace a text file (old version kept for job undo)."
 	case "edit":
-		return "edit{path,find,replace,regex}: replace text in a file. Or edits:[{find,replace,regex,count}], or append:text."
+		return "edit{path,find,replace,all,count,regex}: find must match once (copy it exactly, with a neighbour line if needed); returns changed lines. Or edits:[{find,replace}], or append:text."
 	case "model":
 		return "model{action:list|use|stop,name}: list = models and which is loaded; use name=" + strings.Join(modelNames(), "|") + " loads it on port 8080 (the chat pauses until it's loaded); stop unloads it."
 	case "help":
@@ -610,14 +649,17 @@ var shortHelp = map[string]string{
 	"rag":     "rag: search{query,k,under,ext,scope:all|files|notes,tag} remember{text,tags[]} notes{tag} forget{ids[]} update{paths[],dry_run} status config{roots[],types[],exclude[]}",
 	"sys":     "sys{action:info|processes|ports|kill,filter,port,pids[],name}",
 	"files":   "files{steps:[{op,from[],to}],dry_run}: ops copy move sync delete(Recycle Bin) rename{rules:[{replace,with,template,prefix,suffix,case,ext}]} mkdir download extract edit{edits:[{find,replace}]} write{content}; per step: include exclude recursive newer_than min_size conflict:keep_both|skip|newer|overwrite.",
-	"job":     "job{action:status|list|cancel|undo,id,wait_seconds}",
+	"job":     "job{action:status|list|log|cancel|undo,id,wait_seconds}: log = new output since the last log (dev servers); cancel stops the whole process tree.",
 	"saved":   "saved{action:list|show|save|remove,name,steps}",
-	"browser": "browser{action:open|text|find|links|click|fill|press|wait|close,url,target,value,pattern,show}: real Chrome, text only.",
+	"browser": "browser{action:open|text|find|links|click|fill|press|wait|console|close,url,target,value,pattern,show}: real Chrome, text only; localhost:PORT works; console = page errors since the last call.",
 	"window":  "window{action,window:title|program|pid}: list{filter} text ocr{x,y,w,h,boxes} copy wait{pattern} clipboard{text} screenshot{question}\ndo{steps:[{click:name}{type,into}{press}{wait}{click_text,nth}{click_at:[x,y]}{move:[x,y]}{drag:[x1,y1,x2,y2]}{scroll:n}{hold,secs}],button,then:\"text\"}",
 	"media":   "media{action:info|transcript|frames,path,language,timestamps}: audio/video as text.",
+	"git":     "git{action:status|diff|log|commit|push|pull|clone|ci,path,message,paths[],full,ref,n,url,to,wait_seconds}: never as admin; ci = latest GitHub Actions run, failing lines only.",
+	"check":   "check{path,action:check|build,fix}: lint/type-check, or build+tests; failing lines only. Run after every code change.",
+	"plan":    "plan{set:[steps]|add:step|done:n|show}: short task list for this session; set it first, mark each step done.",
 }
 
-var helpKey = map[string]string{"scan": "ls", "system": "sys", "local_ai": "ai", "run_job": "files", "find": "find", "read": "read", "run": "run", "web": "web", "office": "office", "rag": "rag", "job": "job", "saved": "saved", "browser": "browser", "window": "window", "media": "media"}
+var helpKey = map[string]string{"scan": "ls", "system": "sys", "local_ai": "ai", "run_job": "files", "find": "find", "read": "read", "run": "run", "web": "web", "office": "office", "rag": "rag", "job": "job", "saved": "saved", "browser": "browser", "window": "window", "media": "media", "git": "git", "check": "check"}
 
 var (
 	jobHeadRe = regexp.MustCompile(`(?m)^Job \d{8}-\d{9}-[0-9a-f]{4}(?: "[^"\n]*")?: (done|exited|failed|canceled)`)

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,7 +35,53 @@ const approvalTTL = 10 * time.Minute
 // spawnApprovals starts the approval server if it isn't running (a hook for tests).
 var spawnApprovals = spawnApprovalServer
 
-func approvalMode() bool { return strings.EqualFold(strings.TrimSpace(cfg.Approval), "client") }
+// approvalMode: client approvals apply to API callers (LM Studio's bridge, unknown
+// clients). Cline and AnythingLLM show the chat to the user, so they keep the in-chat
+// confirm. approval_exempt_clients overrides the exempt list.
+func approvalMode() bool {
+	if !strings.EqualFold(strings.TrimSpace(cfg.Approval), "client") {
+		return false
+	}
+	name := strings.ToLower(clientName())
+	if name == "" {
+		return true
+	}
+	exempt := cfg.ApprovalExempt
+	if len(exempt) == 0 {
+		exempt = []string{"cline", "anythingllm", "anything-llm"}
+	}
+	for _, e := range exempt {
+		if e = strings.ToLower(strings.TrimSpace(e)); e != "" && strings.Contains(name, e) {
+			return false
+		}
+	}
+	return true
+}
+
+// mcpClient is the clientInfo.name the MCP client sent on initialize.
+var mcpClient atomic.Value
+
+func clientName() string {
+	s, _ := mcpClient.Load().(string)
+	return s
+}
+
+// noteClient remembers the client and logs it once (data\mcp-clients.log), so the exempt
+// list can be checked against real names.
+func noteClient(name, version string) {
+	mcpClient.Store(name)
+	if appHome == "" {
+		return
+	}
+	p := filepath.Join(appHome, "mcp-clients.log")
+	if fi, err := os.Stat(p); err == nil && fi.Size() > 64<<10 {
+		os.Rename(p, p+".old")
+	}
+	if f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintf(f, "%s\t%s\t%s\tapprovals=%v\n", time.Now().Format("2006-01-02 15:04:05"), name, version, approvalMode())
+		f.Close()
+	}
+}
 
 func approvalPort() int {
 	if cfg.ApprovalPort > 0 {

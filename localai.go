@@ -25,7 +25,7 @@ func consoleStartLocalAI() int {
 	spawnApprovals()
 	if useLMStudio() {
 		out, err := startLMStudio()
-		fmt.Println(out)
+		fmt.Println(out + syncFrontends())
 		if err != nil {
 			fmt.Println(err)
 			waitEnter("Press Enter to close.", 0)
