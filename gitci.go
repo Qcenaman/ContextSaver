@@ -1,62 +1,108 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
-// git ci: the branch's latest GitHub Actions run via the gh CLI (user session, never
-// elevated). Waits up to wait_seconds for it to finish; on failure only the failing
-// step's last lines come back.
+// git ci: the branch's latest GitHub Actions run through the GitHub API, signed in with
+// the token Git already stores for github.com (Git Credential Manager), so no extra
+// login is needed. Waits up to wait_seconds; on failure only the failing step's last
+// lines come back.
 
 type ghRun struct {
-	ID         int64  `json:"databaseId"`
+	ID         int64  `json:"id"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
-	Name       string `json:"workflowName"`
-	Sha        string `json:"headSha"`
-	URL        string `json:"url"`
+	Name       string `json:"name"`
+	Sha        string `json:"head_sha"`
+	URL        string `json:"html_url"`
 }
 
-// ghExec runs gh in dir (a var so tests can fake it).
-var ghExec = func(dir string, timeout time.Duration, args ...string) (string, error) {
-	if _, err := exec.LookPath("gh"); err != nil {
-		return "", errors.New("GitHub CLI (gh) is not installed")
-	}
-	cmd := exec.Command("gh", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "NO_COLOR=1")
-	hideWindow(cmd)
-	done := make(chan struct{})
-	var out []byte
-	var err error
-	go func() { out, err = cmd.CombinedOutput(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		if cmd.Process != nil {
-			cmd.Process.Kill()
+var (
+	ghTokenOnce sync.Once
+	ghToken     string
+)
+
+// githubToken reads the github.com password Git has stored, without prompting.
+func githubToken() string {
+	ghTokenOnce.Do(func() {
+		if t := os.Getenv("GH_TOKEN"); t != "" {
+			ghToken = t
+			return
 		}
-		return "", fmt.Errorf("gh %s timed out", args[0])
+		cmd := exec.Command("git", "credential", "fill")
+		cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never")
+		hideWindow(cmd)
+		out, err := cmd.Output()
+		if err != nil {
+			return
+		}
+		for _, l := range strings.Split(string(out), "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(l), "password="); ok {
+				ghToken = v
+			}
+		}
+	})
+	return ghToken
+}
+
+// ghAPI calls the GitHub REST API (a var so tests can fake it).
+var ghAPI = func(method, path string, body any) ([]byte, int, error) {
+	tok := githubToken()
+	if tok == "" {
+		return nil, 0, errors.New("no GitHub sign-in stored for git: push once (git{action:push}) so Git signs in, then retry")
 	}
-	s := strings.TrimSpace(stripCtl(string(out)))
+	var rd io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequest(method, "https://api.github.com"+path, rd)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
-		if strings.Contains(s, "gh auth login") {
-			return "", errors.New("gh isn't signed in: run `gh auth login` once on the PC")
-		}
-		return "", fmt.Errorf("gh %s: %s", args[0], clip1(s, 300))
+		return nil, 0, err
 	}
-	return s, nil
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	return b, resp.StatusCode, nil
+}
+
+var ghRemoteRe = regexp.MustCompile(`github\.com[:/]([^/]+)/([^/\s]+?)(?:\.git)?/?$`)
+
+func ghRepoOf(root string) (string, error) {
+	u, _, err := gitExec(root, 20*time.Second, "remote", "get-url", "origin")
+	if err != nil {
+		return "", err
+	}
+	m := ghRemoteRe.FindStringSubmatch(strings.TrimSpace(u))
+	if m == nil {
+		return "", fmt.Errorf("origin isn't a GitHub repo: %s", strings.TrimSpace(u))
+	}
+	return m[1] + "/" + m[2], nil
 }
 
 var ciPoll = 10 * time.Second
 
 func gitCI(root string, a gitArgs) (string, error) {
+	repo, err := ghRepoOf(root)
+	if err != nil {
+		return "", err
+	}
 	branch := a.Ref
 	if branch == "" {
 		b, _, err := gitExec(root, 20*time.Second, "rev-parse", "--abbrev-ref", "HEAD")
@@ -71,21 +117,23 @@ func gitCI(root string, a gitArgs) (string, error) {
 	deadline := time.Now().Add(time.Duration(wait) * time.Second)
 	var r ghRun
 	for {
-		out, err := ghExec(root, 30*time.Second, "run", "list", "--branch", branch, "-L", "1", "--json", "databaseId,status,conclusion,workflowName,headSha,url")
+		b, code, err := ghAPI("GET", fmt.Sprintf("/repos/%s/actions/runs?branch=%s&per_page=1", repo, branch), nil)
 		if err != nil {
 			return "", err
 		}
-		var rs []ghRun
-		if err := json.Unmarshal([]byte(out), &rs); err != nil {
-			return "", fmt.Errorf("gh run list: %s", clip1(out, 200))
+		if code != 200 {
+			return "", fmt.Errorf("GitHub API %d: %s", code, clip1(string(b), 200))
 		}
-		if len(rs) == 0 {
+		var rs struct {
+			Runs []ghRun `json:"workflow_runs"`
+		}
+		json.Unmarshal(b, &rs)
+		if len(rs.Runs) == 0 {
 			if time.Now().After(deadline) {
 				return "no Actions runs for branch " + branch + " (is there a .github/workflows file, and was it pushed?)", nil
 			}
 		} else {
-			r = rs[0]
-			// a run for an older commit means the new one hasn't started yet
+			r = rs.Runs[0]
 			fresh := head == "" || r.Sha == head
 			if fresh && r.Status == "completed" || time.Now().After(deadline) {
 				break
@@ -108,38 +156,75 @@ func gitCI(root string, a gitArgs) (string, error) {
 	if r.Conclusion == "success" {
 		return res, nil
 	}
-	log, err := ghExec(root, 60*time.Second, "run", "view", fmt.Sprint(r.ID), "--log-failed")
-	if err != nil {
-		return res + "\n" + r.URL, nil
+	if tail := ciFailure(repo, r.ID); tail != "" {
+		return res + "\n" + tail, nil
 	}
-	return res + "\n" + failedTail(log, 25), nil
+	return res + "\n" + r.URL, nil
 }
 
-// failedTail keeps the last n lines of gh's failed-step log, without the job/step prefix
-// columns and timestamps.
+// ciFailure: the failing job's failing step and the last lines of that job's log.
+func ciFailure(repo string, runID int64) string {
+	b, code, err := ghAPI("GET", fmt.Sprintf("/repos/%s/actions/runs/%d/jobs", repo, runID), nil)
+	if err != nil || code != 200 {
+		return ""
+	}
+	var js struct {
+		Jobs []struct {
+			ID         int64  `json:"id"`
+			Name       string `json:"name"`
+			Conclusion string `json:"conclusion"`
+			Steps      []struct {
+				Name       string `json:"name"`
+				Conclusion string `json:"conclusion"`
+			} `json:"steps"`
+		} `json:"jobs"`
+	}
+	json.Unmarshal(b, &js)
+	for _, j := range js.Jobs {
+		if j.Conclusion != "failure" {
+			continue
+		}
+		step := ""
+		for _, s := range j.Steps {
+			if s.Conclusion == "failure" {
+				step = s.Name
+				break
+			}
+		}
+		log, code, err := ghAPI("GET", fmt.Sprintf("/repos/%s/actions/jobs/%d/logs", repo, j.ID), nil)
+		head := "failing job: " + j.Name
+		if step != "" {
+			head += ", step: " + step
+		}
+		if err != nil || code != 200 {
+			return head
+		}
+		return head + "\n" + failedTail(string(log), 25)
+	}
+	return ""
+}
+
+var logStampRe = regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z ?`)
+
+// failedTail keeps the last n useful lines of a job log, without timestamps and the
+// runner's cleanup noise after the error.
 func failedTail(log string, n int) string {
 	lines := strings.Split(strings.ReplaceAll(log, "\r\n", "\n"), "\n")
 	var out []string
-	step := ""
 	for _, l := range lines {
-		parts := strings.SplitN(l, "\t", 3)
-		if len(parts) == 3 {
-			step = parts[1]
+		if parts := strings.SplitN(l, "\t", 3); len(parts) == 3 {
 			l = parts[2]
 		}
-		if len(l) > 29 && l[4] == '-' && l[10] == 'T' && strings.Contains(l[:29], "Z") {
-			l = strings.TrimSpace(l[strings.Index(l, "Z")+1:])
+		l = logStampRe.ReplaceAllString(l, "")
+		if strings.HasPrefix(l, "Post job cleanup") || strings.HasPrefix(l, "Cleaning up orphan") {
+			break
 		}
-		if strings.TrimSpace(l) != "" {
+		if strings.TrimSpace(l) != "" && !strings.HasPrefix(l, "##[group]") && !strings.HasPrefix(l, "##[endgroup]") {
 			out = append(out, l)
 		}
 	}
 	if len(out) > n {
 		out = out[len(out)-n:]
 	}
-	head := ""
-	if step != "" {
-		head = "failing step: " + step + "\n"
-	}
-	return head + strings.Join(out, "\n")
+	return strings.Join(out, "\n")
 }
