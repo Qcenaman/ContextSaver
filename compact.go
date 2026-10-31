@@ -20,7 +20,7 @@ import (
 
 const compactDesc = `Controls the user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths.
 open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action,path} rag{query|text} sys{action} model{name} more{id}
-git{action:status|commit|push|ci,path,message} check{path} after code changes; plan{set|done|show}
+git{action:status|commit|push|ci,path,message} check{path} lints, check{path,action:build} builds+tests (not run); plan{set|done|show}
 Also: files job saved browser window media. help{c} = all args.`
 
 // clineDesc: with "mcp --for cline" only what Cline lacks is advertised (Cline has its
@@ -104,6 +104,7 @@ func callCompact(raw json.RawMessage) (string, []toolImage, error) {
 // callCompactP runs one pc call; progress (may be nil) sends MCP progress notes while it
 // blocks on an approval.
 func callCompactP(raw json.RawMessage, progress func(string)) (string, []toolImage, error) {
+	start := time.Now()
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &top); err != nil {
 		return "", nil, fmt.Errorf("bad arguments: %v", err)
@@ -171,7 +172,7 @@ func callCompactP(raw json.RawMessage, progress func(string)) (string, []toolIma
 			}
 		}
 	}
-	out, imgs, err := compactDispatch(c, args)
+	out, imgs, err := runLimited(start, func() (string, []toolImage, error) { return compactDispatch(c, args) })
 	if err != nil {
 		return "", nil, errors.New(clip1(err.Error(), 600))
 	}
@@ -199,6 +200,12 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		}
 		return compactHelp(c), nil, nil
 	case "more", "next":
+		if o, im, err, ok := moreSlow(str(a, "id")); ok {
+			if err != nil {
+				return "", nil, err
+			}
+			return capOut(o), im, nil
+		}
 		return moreOut(str(a, "id"), intArg(a, "from")), nil, nil
 	case "plan", "todo", "tasks":
 		return toolPlan(a), nil, nil

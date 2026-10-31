@@ -35,6 +35,7 @@ type Config struct {
 	ApprovalToken       string            `json:"approval_token,omitempty"` // the approval server's bearer token
 	ApprovalPort        int               `json:"approval_port,omitempty"`  // default 1235
 	LMSToken            string            `json:"lms_token,omitempty"`
+	ToolCallLimit       int               `json:"tool_call_limit_seconds,omitempty"`   // longer pc calls continue in the background (default 50 for LM Studio)
 	ApprovalWaitSeconds int               `json:"approval_wait_seconds,omitempty"`     // approval "wait": how long a call blocks (default 600)
 	ApprovalWaitCap     int               `json:"approval_wait_cap_seconds,omitempty"` // below the client's tool-call timeout: then fall back to "call again"
 	ApprovalExempt      []string          `json:"approval_exempt_clients,omitempty"`   // MCP clients that keep the in-chat confirm (default cline, anythingllm)
