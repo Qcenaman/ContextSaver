@@ -43,6 +43,7 @@ func serveMCP(in io.Reader, out io.Writer) {
 		out.Write(append(b, '\n'))
 		wmu.Unlock()
 	}
+	mcpSend = send
 	var wg sync.WaitGroup
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
@@ -66,6 +67,22 @@ func serveMCP(in io.Reader, out io.Writer) {
 	wg.Wait()
 	waitAllJobs()
 	embedSrv.shutdown()
+}
+
+// mcpSend writes a message to the client (set while serving).
+var mcpSend func(any)
+
+// progressFunc sends notifications/progress for a call that sent a progress token
+// (clients reset their tool-call timeout on progress); nil without a token.
+func progressFunc(tok any) func(string) {
+	if tok == nil || mcpSend == nil {
+		return nil
+	}
+	n := 0
+	return func(msg string) {
+		n++
+		mcpSend(map[string]any{"jsonrpc": "2.0", "method": "notifications/progress", "params": map[string]any{"progressToken": tok, "progress": n, "message": msg}})
+	}
 }
 
 func handleRPC(req rpcReq) map[string]any {
@@ -99,6 +116,9 @@ func handleRPC(req rpcReq) map[string]any {
 		var p struct {
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
+			Meta      struct {
+				ProgressToken any `json:"progressToken"`
+			} `json:"_meta"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			resp["error"] = map[string]any{"code": -32602, "message": "bad params"}
@@ -107,7 +127,14 @@ func handleRPC(req rpcReq) map[string]any {
 		if len(p.Arguments) == 0 || string(p.Arguments) == "null" {
 			p.Arguments = json.RawMessage("{}")
 		}
-		text, imgs, err := callTool(p.Name, p.Arguments)
+		var text string
+		var imgs []toolImage
+		var err error
+		if p.Name == "pc" {
+			text, imgs, err = callCompactP(p.Arguments, progressFunc(p.Meta.ProgressToken))
+		} else {
+			text, imgs, err = callTool(p.Name, p.Arguments)
+		}
 		isErr := err != nil
 		if isErr {
 			text, imgs = err.Error(), nil

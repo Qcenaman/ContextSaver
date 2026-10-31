@@ -98,6 +98,12 @@ func maxOut() int {
 
 // callCompact runs one "pc" call.
 func callCompact(raw json.RawMessage) (string, []toolImage, error) {
+	return callCompactP(raw, nil)
+}
+
+// callCompactP runs one pc call; progress (may be nil) sends MCP progress notes while it
+// blocks on an approval.
+func callCompactP(raw json.RawMessage, progress func(string)) (string, []toolImage, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &top); err != nil {
 		return "", nil, fmt.Errorf("bad arguments: %v", err)
@@ -153,7 +159,11 @@ func callCompact(raw json.RawMessage) (string, []toolImage, error) {
 			return note, nil, nil
 		}
 		if what := riskyAction(c, args); what != "" && !confirmed {
-			if ok, n := spendConfirm(confirm, c, args); !ok {
+			if confirm == "" && approvalKind() == "wait" {
+				if ok, msg := waitApproval(c, args, what, progress); !ok {
+					return msg, nil, nil
+				}
+			} else if ok, n := spendConfirm(confirm, c, args); !ok {
 				if n == "" {
 					n = note
 				}

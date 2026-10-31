@@ -102,6 +102,20 @@ func TestApprovalServer(t *testing.T) {
 	}
 	if r := do("POST", "/approvals/"+id+"/approve", "secret"); r.StatusCode != 200 {
 		t.Fatal("approve failed", r.StatusCode)
+	} else {
+		var s struct{ Status string }
+		json.NewDecoder(r.Body).Decode(&s)
+		if s.Status != "approved" {
+			t.Fatalf("status %q", s.Status)
+		}
+	}
+	id2, _ := newApproval("run", map[string]any{"command": "y"}, "run command: y")
+	if r := do("POST", "/approvals/"+id2+"/deny", "secret"); r.StatusCode == 200 {
+		var s struct{ Status string }
+		json.NewDecoder(r.Body).Decode(&s)
+		if s.Status != "denied" {
+			t.Fatalf("deny status %q", s.Status)
+		}
 	}
 	if r := do("POST", "/approvals/"+id+"/approve", "secret"); r.StatusCode != 404 {
 		t.Fatal("approved twice")

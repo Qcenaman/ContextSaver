@@ -27,7 +27,8 @@ type approval struct {
 	What    string    `json:"what"`
 	Created time.Time `json:"created"`
 	Expires time.Time `json:"expires"`
-	Status  string    `json:"status"` // pending | approved | denied
+	Status  string    `json:"status"`  // pending | approved | denied | expired
+	Waiting bool      `json:"waiting"` // a pc call is blocked on it (approval "wait")
 }
 
 const approvalTTL = 10 * time.Minute
@@ -39,7 +40,7 @@ var spawnApprovals = spawnApprovalServer
 // clients). Cline and AnythingLLM show the chat to the user, so they keep the in-chat
 // confirm. approval_exempt_clients overrides the exempt list.
 func approvalMode() bool {
-	if !strings.EqualFold(strings.TrimSpace(cfg.Approval), "client") {
+	if m := strings.ToLower(strings.TrimSpace(cfg.Approval)); m != "client" && m != "wait" {
 		return false
 	}
 	name := strings.ToLower(clientName())
@@ -113,11 +114,15 @@ func loadApproval(id string) (*approval, error) {
 }
 
 func newApproval(c string, a map[string]any, what string) (string, error) {
+	return newApprovalOpt(c, a, what, false)
+}
+
+func newApprovalOpt(c string, a map[string]any, what string, waiting bool) (string, error) {
 	os.MkdirAll(approvalsDir(), 0o755)
 	pruneApprovals()
 	id := randHex(4)
 	now := time.Now()
-	ap := approval{ID: id, Hash: argsHash(c, a), What: clip1(what, 300), Created: now, Expires: now.Add(approvalTTL), Status: "pending"}
+	ap := approval{ID: id, Hash: argsHash(c, a), What: clip1(what, 300), Created: now, Expires: now.Add(approvalTTL), Status: "pending", Waiting: waiting}
 	p, _ := approvalPath(id)
 	return id, writeJSONAtomic(p, ap)
 }
@@ -126,7 +131,13 @@ func newApproval(c string, a map[string]any, what string) (string, error) {
 // denied one; it is empty when the id doesn't belong to these args.
 func useApproval(id, c string, a map[string]any) (ok bool, note string) {
 	ap, err := loadApproval(id)
-	if err != nil || ap.Hash != argsHash(c, a) {
+	if err != nil {
+		if p, perr := approvalPath(id); perr == nil && exists(p+".used") {
+			return false, "Approval " + id + " was already used: it ran once. Don't retry it."
+		}
+		return false, ""
+	}
+	if ap.Hash != argsHash(c, a) {
 		return false, ""
 	}
 	switch {
@@ -247,7 +258,11 @@ func approvalHandler(token string) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"id": r.PathValue("id"), "status": d + "d"})
+		status := "approved"
+		if d == "deny" {
+			status = "denied"
+		}
+		json.NewEncoder(w).Encode(map[string]string{"id": r.PathValue("id"), "status": status})
 	}))
 	return mux
 }
@@ -337,7 +352,7 @@ func consoleApprovals(args []string) int {
 			fmt.Println(err)
 			return 1
 		}
-		fmt.Println(args[1], args[0]+"d")
+		fmt.Println(args[1], map[string]string{"approve": "approved", "deny": "denied"}[args[0]])
 	default:
 		fmt.Println("usage: contextsaver approvals [token | list | approve <id> | deny <id>]")
 		return 2
