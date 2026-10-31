@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-const appVersion = "1.9.0"
+const appVersion = "1.10.0"
 
 func main() {
 	initApp()
@@ -21,6 +21,8 @@ func main() {
 		os.Exit(consoleStopLocalAI())
 	case "model":
 		os.Exit(consoleModel(args[1:]))
+	case "approvals":
+		os.Exit(consoleApprovals(args[1:]))
 	case "mcp":
 		serveMCP(os.Stdin, os.Stdout)
 	case "run":

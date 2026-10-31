@@ -111,19 +111,25 @@ func callCompact(raw json.RawMessage) (string, []toolImage, error) {
 		// confirm:"<token>" is the user's approval for a risky call.
 		guard, _ := args["confirm"].(bool)
 		delete(args, "confirm")
-		confirmed := false
+		confirmed, note := false, ""
 		if guard {
 			args["confirm"] = true
 		} else if confirm != "" {
 			// the token approved a call that had confirm:true; give it back
 			args["confirm"] = true
-			if confirmed = useConfirm(confirm, c, args); !confirmed {
+			if confirmed, note = spendConfirm(confirm, c, args); !confirmed {
 				delete(args, "confirm")
 			}
 		}
+		if note != "" { // a pending or denied approval for exactly this call
+			return note, nil, nil
+		}
 		if what := riskyAction(c, args); what != "" && !confirmed {
-			if !useConfirm(confirm, c, args) {
-				return "CONFIRM " + newConfirm(c, args) + ": " + what + "; ask the user, then call again with the same args plus confirm:<token>", nil, nil
+			if ok, n := spendConfirm(confirm, c, args); !ok {
+				if n == "" {
+					n = note
+				}
+				return askApproval(c, args, what, n), nil, nil
 			}
 		}
 	}

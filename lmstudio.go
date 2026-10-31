@@ -145,7 +145,11 @@ func lmsStatus() string {
 }
 
 func lmsServerStart() error {
-	if err := lmsCmd(60*time.Second, "server", "start"); err != nil {
+	args := []string{"server", "start"}
+	if cfg.LMSBind != "" {
+		args = append(args, "--bind", cfg.LMSBind)
+	}
+	if err := lmsCmd(60*time.Second, args...); err != nil {
 		return fmt.Errorf("couldn't start LM Studio's server: %v", err)
 	}
 	return nil

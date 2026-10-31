@@ -22,6 +22,7 @@ func consoleStartLocalAI() int {
 	if msg := startHelper(); msg != "" {
 		fmt.Println(msg)
 	}
+	spawnApprovals()
 	if useLMStudio() {
 		out, err := startLMStudio()
 		fmt.Println(out)

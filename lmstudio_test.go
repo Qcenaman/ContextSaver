@@ -52,6 +52,17 @@ func TestStartLMStudioLoadsConfigModel(t *testing.T) {
 	}
 }
 
+func TestStartLMStudioBind(t *testing.T) {
+	calls := fakeLMS(t, "qwen3.6-27b")
+	old := cfg.LMSBind
+	t.Cleanup(func() { cfg.LMSBind = old })
+	cfg.LMSBind = "0.0.0.0"
+	startLMStudio()
+	if got := strings.Join(*calls, " | "); got != "server start --bind 0.0.0.0" {
+		t.Fatalf("lms calls: %s", got)
+	}
+}
+
 func TestStartLMStudioKeepsLoadedModel(t *testing.T) {
 	calls := fakeLMS(t, "gemma-4-31b-it")
 	out, err := startLMStudio()
