@@ -100,6 +100,24 @@ func riskyAction(c string, a map[string]any) string {
 		return ""
 	case "phone", "android", "install_app", "apk", "mobile":
 		return phoneRisky(a)
+	case "export", "zip":
+		if _, ok := a["files"]; ok {
+			return "write files under " + str(a, "path")
+		}
+		return ""
+	case "new", "scaffold":
+		return "create project " + str(a, "name") + " and its GitHub repo"
+	case "release":
+		return "publish release " + str(a, "version") + " of " + str(a, "path")
+	case "deps", "dependencies":
+		if act != "" && act != "list" {
+			return act + " dependency " + str(a, "name") + " in " + str(a, "path")
+		}
+		return ""
+	case "compile", "build", "test", "tests":
+		return "build or test " + str(a, "path")
+	case "outline", "symbols", "logcat", "crash", "crashes", "login":
+		return ""
 	}
 	switch tool {
 	case "run":
@@ -114,12 +132,15 @@ func riskyAction(c string, a map[string]any) string {
 			return "git push " + str(a, "path")
 		}
 	case "check":
-		if act == "build" {
+		if act == "build" || act == "test" || act == "compile" {
 			return "build and run the tests of " + str(a, "path")
 		}
 	case "system":
 		if act == "kill" {
 			return "kill processes " + args()
+		}
+		if act == "setup" {
+			return "install programs for ContextSaver (" + str(a, "what") + ")"
 		}
 	case "window":
 		if act == "do" {

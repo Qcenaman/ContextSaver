@@ -27,3 +27,9 @@ func moveTree(src, dst string) error { return errElevWindowsOnly }
 func startHelper() string { return "" }
 
 func stopHelper() string { return "" }
+
+func helperInstalled() bool { return false }
+
+func helperHowTo() string {
+	return "The admin helper isn't installed, so commands that need admin won't work. To install it once, run: contextsaver install-helper"
+}

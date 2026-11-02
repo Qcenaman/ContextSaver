@@ -726,6 +726,7 @@ func writeModelShortcuts(exe string) (string, error) {
 		}
 	}
 	os.WriteFile(filepath.Join(dir, "Stop model.cmd"), []byte("@\""+exe+"\" model stop\r\n@timeout /t 3 >nul\r\n"), 0o644)
+	writeModelIcons(exe, set.listed)
 	out := "shortcuts in " + dir + ": " + strings.Join(set.listed, ", ")
 	if len(removed) > 0 {
 		out += "\nremoved: " + strings.Join(removed, ", ")

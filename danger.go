@@ -32,6 +32,8 @@ var dangerExtraRe = func() *regexp.Regexp {
 		`adb(?:\.exe)?\b[^;&|]*\s(?:uninstall|pm\s+(?:uninstall|clear|disable)|rm)\b`,
 		`(?:choco|scoop|pip3?|npm|pnpm|yarn)(?:\.exe|\.cmd)?\s+(?:uninstall|remove)\b[^;&|]*\s(?:-g|--global)\b`,
 		`(?:choco|scoop)(?:\.exe|\.cmd)?\s+uninstall\b`,
+		`git(?:\.exe)?\s+push\b[^;&|]*\s(?:--force|-f)\b`,
+		`:\s*>\s*\S`,
 		`Uninstall-\w+`,
 		`dism(?:\.exe)?\b[^;&|]*/(?:remove|disable)`,
 		`Remove-\w+`,

@@ -175,6 +175,10 @@ func TestModelShortcutsFollowFile(t *testing.T) {
 	modelHome(t)
 	root := t.TempDir()
 	t.Setenv("CONTEXTSAVER_ROOT", root)
+	icons := t.TempDir() // the "Local AI - <model>" icons land here, not on the Desktop
+	oi := iconDir
+	iconDir = func() string { return icons }
+	t.Cleanup(func() { iconDir = oi })
 	gone := filepath.Join(root, "Use model - gone.cmd")
 	os.WriteFile(gone, []byte("x"), 0o644)
 	writeModels(t, `{"models": [{"name": "one", "script": "one.bat"}, {"name": "two", "gguf": ""}]}`)

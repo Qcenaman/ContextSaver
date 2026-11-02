@@ -9,21 +9,26 @@ import (
 	"time"
 )
 
-// Desktop icons: "Local AI" loads the last-used model and opens AnythingLLM;
-// "Stop Local AI" stops the local model ContextSaver started (when idle; servers
-// started elsewhere stay up for RemoteAI and others) and closes AnythingLLM, which also ends
-// ContextSaver and its admin helper. "Local AI" starts the admin helper first;
-// "Stop Local AI" closes everything.
+// Desktop icons: "Local AI" loads the last-used model and opens AnythingLLM (or, without
+// AnythingLLM, ContextSaver Chat in its own window); "Local AI - <model>" loads that model
+// and opens its chat; "Stop Local AI" stops the local model ContextSaver started (when idle;
+// servers started elsewhere stay up for RemoteAI and others), closes the chat windows and
+// AnythingLLM, which also ends ContextSaver and its admin helper. "Local AI" starts the
+// admin helper first (or says how to install it); "Stop Local AI" closes everything.
 
 func anythingLLMExe() string {
 	return filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "AnythingLLM", "AnythingLLM.exe")
 }
 
 func consoleStartLocalAI() int {
+	enableVT()
 	if msg := startHelper(); msg != "" {
 		fmt.Println(msg)
 	}
-	spawnApprovals()
+	chat := !useLMStudio() && !exists(anythingLLMExe())
+	if !chat {
+		spawnApprovals() // the chat asks in its own window
+	}
 	if useLMStudio() {
 		out, err := startLMStudio()
 		fmt.Println(out + syncFrontends())
@@ -60,7 +65,7 @@ func consoleStartLocalAI() int {
 			}
 		}
 	} else {
-		fmt.Println("AnythingLLM not found at", exe)
+		return consoleChat(nil) // no AnythingLLM here: ContextSaver's own chat, in this window
 	}
 	time.Sleep(2 * time.Second)
 	return 0
@@ -81,6 +86,9 @@ func consoleStopLocalAI() int {
 			quietCmd("taskkill", "/IM", "AnythingLLM.exe", "/T", "/F").Run()
 		}
 		fmt.Println("AnythingLLM closed")
+	}
+	if n := killChats(); n > 0 {
+		fmt.Println("Closed", n, "chat window(s)")
 	}
 	if stopOtherContextSavers() > 0 {
 		fmt.Println("ContextSaver closed")
@@ -123,34 +131,55 @@ func processRunning(exe string) bool {
 	return false
 }
 
-// writeDesktopShortcuts puts the two icons on the Desktop (with AnythingLLM's icon).
+// writeDesktopShortcuts puts "Local AI" (with AnythingLLM's icon) and "Stop Local AI" on
+// the Desktop and "ContextSaver Chat" in the Start Menu; the "Local AI - <model>" icons
+// come from writeModelShortcuts.
 func writeDesktopShortcuts(exe string) {
 	if !isWin {
 		return
 	}
 	icon := anythingLLMExe()
-	startDesc, stopDesc := "Load the local model and open AnythingLLM", "Stop the local model and close AnythingLLM"
-	if useLMStudio() {
+	style := 7 // AnythingLLM opens its own window; this one only loads the model
+	startDesc, stopDesc := "Load the local model and open AnythingLLM", "Stop the local model, close the chat windows and AnythingLLM"
+	switch {
+	case useLMStudio():
 		icon = exe
-		startDesc, stopDesc = "Start LM Studio's server and load the local model", "Unload the local model and stop LM Studio's server"
+		startDesc, stopDesc = "Start LM Studio's server and load the local model", "Unload the local model, stop LM Studio's server and close the chat windows"
+	case !exists(icon):
+		icon, style = exe, 1
+		startDesc, stopDesc = "Load the local model and chat with it (ContextSaver Chat)", "Close the chat windows and stop the local model"
 	}
-	if !exists(icon) {
-		icon = exe
-	}
-	ps := ""
-	for _, s := range []struct{ name, arg, desc string }{
-		{"Local AI", "start", startDesc},
-		{"Stop Local AI", "stop", stopDesc},
-	} {
-		lnk := filepath.Join(desktopDir(), s.name+".lnk")
-		ps += fmt.Sprintf("$s=$w.CreateShortcut('%s');$s.TargetPath='%s';$s.Arguments='%s';$s.WorkingDirectory='%s';$s.IconLocation='%s,0';$s.Description='%s';$s.WindowStyle=7;$s.Save();",
-			psq(lnk), psq(exe), s.arg, psq(filepath.Dir(exe)), psq(icon), psq(s.desc))
-	}
-	if err := quietCmd("powershell", "-NoProfile", "-Command", "$w=New-Object -ComObject WScript.Shell;"+ps).Run(); err != nil {
+	sm := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "ContextSaver Chat.lnk")
+	err := writeShortcuts([]shortcut{
+		{filepath.Join(desktopDir(), "Local AI.lnk"), exe, "start", startDesc, icon, style},
+		{filepath.Join(desktopDir(), "Stop Local AI.lnk"), exe, "stop", stopDesc, icon, 7},
+		{sm, exe, "chat", "Chat with the local model, with ContextSaver's tools", exe, 1},
+	})
+	if err != nil {
 		fmt.Println("Couldn't create the desktop icons:", err)
 		return
 	}
-	fmt.Println("Desktop icons: Local AI, Stop Local AI")
+	fmt.Println("Desktop icons: Local AI, Stop Local AI, Local AI - <model> for each model; Start Menu: ContextSaver Chat")
+}
+
+// shortcut: one Windows .lnk (style 1 = normal window, 7 = minimized).
+type shortcut struct {
+	lnk, target, args, desc, icon string
+	style                         int
+}
+
+// writeShortcuts makes the .lnk files in one PowerShell run.
+func writeShortcuts(ss []shortcut) error {
+	if !isWin || len(ss) == 0 {
+		return nil
+	}
+	ps := ""
+	for _, s := range ss {
+		os.MkdirAll(filepath.Dir(s.lnk), 0o755)
+		ps += fmt.Sprintf("$s=$w.CreateShortcut('%s');$s.TargetPath='%s';$s.Arguments='%s';$s.WorkingDirectory='%s';$s.IconLocation='%s,0';$s.Description='%s';$s.WindowStyle=%d;$s.Save();",
+			psq(s.lnk), psq(s.target), psq(s.args), psq(filepath.Dir(s.target)), psq(s.icon), psq(s.desc), s.style)
+	}
+	return quietCmd("powershell", "-NoProfile", "-Command", "$w=New-Object -ComObject WScript.Shell;"+ps).Run()
 }
 
 func psq(s string) string { return strings.ReplaceAll(s, "'", "''") }

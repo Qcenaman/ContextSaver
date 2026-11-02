@@ -18,20 +18,21 @@ import (
 // fetched on demand with c=help, and every result is capped; the rest is kept on
 // disk and paged with c=more.
 
-const compactDesc = `Controls the user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths.
+const compactDesc = `The user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths.
 open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action,path} rag{query|text} sys{action} model{name} more{id}
-git{action:status|commit|push|ci,path,message} check{path} lints, check{path,action:build} builds+tests (not run); plan{set|done|show}
-Also: files job saved browser window media. phone{action:install,app}=user's phone, not adb. help{c}=all args.
+git{action:commit|push|login|release|ci,path,message} check{path,action:build|test|compile,target} outline{path} new{kind,name} deps export
+Also: plan files job saved browser window media. phone{action:install,app}=user's phone, not adb. help{c}=all args.
 The user's own apps (AdbSaver RemoteAI TokenSaver...) are in D:\Claude Apps + github Qcenaman/<name>: never web-search them. me = about the user.`
 
 // clineDesc: with "mcp --for cline" only what Cline lacks is advertised (Cline has its
 // own read/write/edit/run/find/browser); every command still works.
 const clineDesc = `The user's PC beyond Cline's own tools; you CAN act. c=command, a=args, absolute paths.
-git{action:status|diff|log|commit|push|pull|clone|ci,path,message} check{path,action:check|build} after every code change
+git{action:status|diff|log|commit|push|pull|clone|login|ci,path,message} check{path,action:check|build} after every code change
+compile{path,target:linux|windows|android} outline{path} test{path,name} new{kind,name} deps{path,action,name} release{path,version} logcat{app}
 rag{query|text} office{action,path} web{query|url} ai{paths[],question} model{name}
-Also: window media sys saved job phone more. help{c} = all args.`
+Also: window media sys saved job phone export more. help{c} = all args.`
 
-var clineCommands = []string{"git", "check", "rag", "office", "web", "ai", "model", "window", "media", "sys", "saved", "job", "phone", "more", "help"}
+var clineCommands = []string{"git", "check", "compile", "outline", "test", "new", "deps", "release", "logcat", "export", "rag", "office", "web", "ai", "model", "window", "media", "sys", "saved", "job", "phone", "more", "help"}
 
 // The profile in use (set from "mcp --for <client>" before serving).
 var (
@@ -51,7 +52,8 @@ func setProfile(p string) {
 // compactCommands is the one list of canonical pc commands. The schema enum, the
 // unknown-c error and the tests are built from it so they can't drift apart.
 // Aliases in compactAlias (and model names) still work for models that ignore the enum.
-var compactCommands = []string{"open", "find", "ls", "read", "write", "edit", "run", "web", "ai", "office", "rag", "sys", "model", "more", "help", "files", "job", "saved", "browser", "window", "media", "git", "check", "plan", "phone", "me"}
+var compactCommands = []string{"open", "find", "ls", "read", "write", "edit", "run", "web", "ai", "office", "rag", "sys", "model", "more", "help", "files", "job", "saved", "browser", "window", "media", "git", "check", "plan", "phone", "me",
+	"outline", "new", "export", "deps"}
 
 var compactTool = buildCompactTool()
 
@@ -242,6 +244,48 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		return out, nil, err
 	case "model", "models":
 		out, err := toolModel(a)
+		return out, nil, err
+	case "sys", "system":
+		if strings.EqualFold(str(a, "action"), "setup") {
+			out, err := toolSetup(a)
+			return out, nil, err
+		}
+	case "setup", "install":
+		out, err := toolSetup(a)
+		return out, nil, err
+	case "outline", "symbols":
+		out, err := toolOutline(a)
+		return out, nil, err
+	case "test", "tests":
+		out, err := toolTest(a)
+		return out, nil, err
+	case "compile", "build":
+		if c == "build" && str(a, "target") == "" {
+			b, _ := json.Marshal(a)
+			out, err := toolBuild(b)
+			return out, nil, err
+		}
+		b, _ := json.Marshal(a)
+		out, err := toolCompile(b)
+		return out, nil, err
+	case "new", "scaffold":
+		out, err := toolNew(a)
+		return out, nil, err
+	case "export", "zip":
+		return toolExport(a)
+	case "deps", "dependencies":
+		out, err := toolDeps(a)
+		return out, nil, err
+	case "release":
+		a["action"] = "release"
+		b, _ := json.Marshal(a)
+		out, err := toolGit(b)
+		return out, nil, err
+	case "login":
+		out, err := gitLogin()
+		return out, nil, err
+	case "logcat", "crash", "crashes":
+		out, err := toolLogcat(a)
 		return out, nil, err
 	case "write", "save", "create":
 		p := str(a, "path", "to", "file")
@@ -696,20 +740,28 @@ var shortHelp = map[string]string{
 	"ai":      "ai{action:ask|summarize|classify,paths[],question,categories[],move_to}: local AI reads files and pictures.",
 	"office":  "office{action,path}\ncreate: .docx/.pdf from Markdown content; .pptx slides split by --- or headings; .xlsx sheets:[{name,rows}] or CSV content; .pdf from:[files, \"a.pdf:2-5\"].\nedit (backup kept; to=save as): replace:[{find,with}], delete_paragraphs, delete_slides:\"2,4\", content, insert_after; xlsx cells:{\"B2\":5}, append_rows; pdf pages:\"3,1-2\", rotate, stamp:\"{n}/{total}\", split.\nread. convert{to:\".pdf\" or file} via Office.",
 	"rag":     "rag: search{query,k,under,ext,scope:all|files|notes,tag} remember{text,tags[]} notes{tag} forget{ids[]} update{paths[],dry_run} status config{roots[],types[],exclude[]}",
-	"sys":     "sys{action:info|processes|ports|kill,filter,port,pids[],name}",
+	"sys":     "sys{action:info|processes|ports|kill|setup,filter,port,pids[],name,what}: setup installs what ContextSaver needs, what=all|tools|compilers|office|chromium|llama|whisper|android|ndk|github (github gives a sign-in code for the user).",
 	"files":   "files{steps:[{op,from[],to}],dry_run}: ops copy move sync delete(Recycle Bin) rename{rules:[{replace,with,template,prefix,suffix,case,ext}]} mkdir download extract edit{edits:[{find,replace}]} write{content}; per step: include exclude recursive newer_than min_size conflict:keep_both|skip|newer|overwrite.",
 	"job":     "job{action:status|list|log|cancel|undo,id,wait_seconds}: log = new output since the last log (dev servers); cancel stops the whole process tree.",
 	"saved":   "saved{action:list|show|save|remove,name,steps}",
 	"browser": "browser{action:open|text|find|links|click|fill|press|wait|console|close,url,target,value,pattern,show}: real Chrome, text only; localhost:PORT works; console = page errors since the last call.",
 	"window":  "window{action,window:title|program|pid}: list{filter} text ocr{x,y,w,h,boxes} copy wait{pattern} clipboard{text} screenshot{question}\ndo{steps:[{click:name}{type,into}{press}{wait}{click_text,nth}{click_at:[x,y]}{move:[x,y]}{drag:[x1,y1,x2,y2]}{scroll:n}{hold,secs}],button,then:\"text\"}",
 	"media":   "media{action:info|transcript|frames,path,language,timestamps}: audio/video as text.",
-	"git":     "git{action:status|diff|log|commit|push|pull|clone|ci,path,message,paths[],full,ref,n,url,to,wait_seconds}: never as admin; ci = latest GitHub Actions run, failing lines only.",
-	"check":   "check{path,action:check|build,fix}: lint/type-check, or build+tests; failing lines only. Run after every code change.",
+	"git":     "git{action:status|diff|log|commit|push|pull|clone|login|ci,path,message,paths[],full,ref,n,url,to,wait_seconds}: never as admin; login = GitHub sign-in (gives a code for the user); ci = latest GitHub Actions run, failing lines only.",
+	"check":   "check{path,action,fix,name,target,out}: check = lint/type-check; build = build+tests; test = tests (name filters); compile = runnable files for target linux|windows|android into dist/<target>. Failing lines only. Run after every code change.",
+	"compile": "compile{path,target:linux|windows|android,out,release}: runnable files into out (default <project>/dist/<target>): Go, Gradle (.apk), Flutter, Rust, CMake/Make/C/C++, .NET, Electron, Python; one source file works too.",
+	"test":    "test{path,name}: run the tests (only those matching name); failing lines only.",
+	"outline": "outline{path,name}: functions/types with line numbers for a file or project; name filters. Read only the lines you need after.",
+	"new":     "new{kind:go|android|web|python|rust|c,name,path,public,repo}: project with tests + GitHub Actions in ~/Projects/<name>, committed, pushed to a private GitHub repo.",
+	"export":  "export{path,files:{\"rel/name\":\"text\"}}: write many files at once (undo: job undo). export{path,zip:true,out}: the project as a .zip (no .git, deps, builds).",
+	"deps":    "deps{path,action:list|add|update|remove,name}: go/npm/cargo/pip(.venv)/gradle; returns the manifest lines that changed.",
+	"release": "release{path,version,notes[]}: bump the version, commit, push, tag and publish the GitHub Release with notes (or let the repo's release workflow).",
+	"logcat":  "logcat{app,lines,device}: crash and error lines of one app on the phone (adb; device IP:port for wireless).",
 	"plan":    "plan{set:[steps]|add:step|done:n|show}: short task list for this session; set it first, mark each step done.",
 	"phone":   phoneHelp,
 }
 
-const phoneHelp = `phone{action}: the user's Android phone (no adb needed). status (route, engine, battery) | apps{filter} | launch{app or package} | uninstall{app or package} | install: app (name of one of the user's own apps, from its GitHub releases), or repo (owner/name; tag optional), url (direct .apk link), path (.apk on the PC); test:true for debug builds. The user approves installs/uninstalls in RemoteAI; just call it.
+const phoneHelp = `phone{action}: the user's Android phone (no adb needed). status (route, engine, battery) | apps{filter} | launch{app or package} | uninstall{app or package} | install: app (name of one of the user's own apps, from its GitHub releases), or repo (owner/name; tag optional), url (direct .apk link), path (.apk on the PC); test:true for debug builds | logcat{app,lines}: its crash/error lines (adb). The user approves installs/uninstalls in RemoteAI; just call it.
 e.g. {"action":"install","app":"AdbSaver"}`
 
 var helpKey = map[string]string{"scan": "ls", "system": "sys", "local_ai": "ai", "run_job": "files", "find": "find", "read": "read", "run": "run", "web": "web", "office": "office", "rag": "rag", "job": "job", "saved": "saved", "browser": "browser", "window": "window", "media": "media", "git": "git", "check": "check"}

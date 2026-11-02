@@ -157,6 +157,15 @@ var toolChecks = []toolCheck{
 	{name: "nvcc", args: []string{"--version"}, pick: "release"},
 	{name: "ffmpeg", args: []string{"-version"}},
 	{name: "winget", args: []string{"--version"}},
+	{name: "go", args: []string{"version"}},
+	{name: "gh", args: []string{"--version"}, extra: []string{`%ProgramFiles%\GitHub CLI\gh.exe`}},
+	{name: "ctags", args: []string{"--version"}},
+	{name: "gcc", args: []string{"--version"}},
+	{name: "cargo", args: []string{"--version"}, extra: []string{`%USERPROFILE%\.cargo\bin\cargo.exe`}},
+	{name: "java", args: []string{"-version"}},
+	{name: "llama-server", args: []string{"--version"}, extra: []string{`D:\llama.cpp\llama-server.exe`}},
+	{name: "tesseract", args: []string{"--version"}, extra: []string{`%ProgramFiles%\Tesseract-OCR\tesseract.exe`}},
+	{name: "adb", args: []string{"version"}, extra: []string{`%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe`}},
 }
 
 func checkTool(t toolCheck) string {
@@ -354,4 +363,9 @@ func fmtDisk(letter, kind string, free, total uint64) string {
 func appExeDir() string {
 	e, _ := os.Executable()
 	return filepath.Dir(e)
+}
+
+func lookOK(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }

@@ -917,6 +917,7 @@ func ckAndroid(root string) ([]ckIssue, string, string) {
 	if runtime.GOOS == "windows" {
 		gw += ".bat"
 	}
+	os.Chmod(gw, 0o755)
 	start := time.Now().Add(-2 * time.Second)
 	so, se, code, err := ckRunEnv(env, root, 20*time.Minute, gw, "lint", "--console=plain", "-q", "--continue")
 	if err != nil {

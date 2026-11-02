@@ -39,10 +39,7 @@ func buildPlan(root, only string, testsToo bool) ([]buildStep, string) {
 
 	if want("android") && has("gradlew.bat", "gradlew") && has("app/build.gradle", "app/build.gradle.kts", "settings.gradle", "settings.gradle.kts") {
 		kinds = append(kinds, "android")
-		gw := filepath.Join(root, "gradlew.bat")
-		if !exists(gw) {
-			gw = filepath.Join(root, "gradlew")
-		}
+		gw := gradlew(root)
 		tasks := []string{"assembleDebug"}
 		if testsToo {
 			tasks = append(tasks, "testDebugUnitTest")
@@ -64,11 +61,14 @@ func buildPlan(root, only string, testsToo bool) ([]buildStep, string) {
 	if want("js") && has("package.json") {
 		kinds = append(kinds, "js")
 		scripts := pkgScripts(filepath.Join(root, "package.json"))
-		npm := "npm.cmd"
+		npm, npx := "npm", "npx"
+		if isWin {
+			npm, npx = "npm.cmd", "npx.cmd"
+		}
 		if _, ok := scripts["build"]; ok {
 			steps = append(steps, buildStep{"npm run build", root, []string{"CI=1"}, npm, []string{"run", "build", "--silent"}})
 		} else if has("tsconfig.json") {
-			steps = append(steps, buildStep{"tsc --noEmit", root, nil, "npx.cmd", []string{"--no-install", "tsc", "--noEmit", "-p", "."}})
+			steps = append(steps, buildStep{"tsc --noEmit", root, nil, npx, []string{"--no-install", "tsc", "--noEmit", "-p", "."}})
 		}
 		if _, ok := scripts["test"]; ok && testsToo {
 			steps = append(steps, buildStep{"npm test", root, []string{"CI=1"}, npm, []string{"test", "--silent", "--", "--watchAll=false"}})
@@ -76,9 +76,10 @@ func buildPlan(root, only string, testsToo bool) ([]buildStep, string) {
 	}
 	if want("python") && (has("pyproject.toml", "setup.py", "pytest.ini", "tests", "test") || hasGlob(root, "test_*.py")) {
 		kinds = append(kinds, "python")
-		steps = append(steps, buildStep{"python compile", root, nil, "python", []string{"-m", "compileall", "-q", "."}})
+		py := venvPython(root)
+		steps = append(steps, buildStep{"python compile", root, nil, py, []string{"-m", "compileall", "-q", "."}})
 		if testsToo {
-			steps = append(steps, buildStep{"pytest", root, nil, "python", []string{"-m", "pytest", "-q", "-x", "--no-header", "-p", "no:cacheprovider"}})
+			steps = append(steps, buildStep{"pytest", root, nil, py, []string{"-m", "pytest", "-q", "-x", "--no-header", "-p", "no:cacheprovider"}})
 		}
 	}
 	return steps, strings.Join(kinds, ", ")
@@ -106,12 +107,15 @@ func pkgScripts(p string) map[string]string {
 // Lines worth showing from a failed build/test run.
 var buildErrRe = regexp.MustCompile(`(?i)(^|\s)(error|fail|failed|panic|exception|traceback|cannot|undefined|not found|expected|assert|\.go:\d+|\.ts\(\d+|\.py", line|\.kt:\d+|e: |--- FAIL|FAIL\s|\berror\[)`)
 
+// srcPosRe: a source position (main_test.go:12:, app.kt:3:5) anywhere in a line.
+var srcPosRe = regexp.MustCompile(`\w\.(?:go|ts|tsx|js|mjs|py|kt|kts|java|rs|c|cc|cpp|h|hpp|cs|dart|swift):\d+`)
+
 func buildErrLines(out string, max int) []string {
 	var res []string
 	seen := map[string]bool{}
 	for _, l := range strings.Split(out, "\n") {
 		t := strings.TrimRight(l, "\r")
-		if strings.TrimSpace(t) == "" || !buildErrRe.MatchString(t) {
+		if strings.TrimSpace(t) == "" || !buildErrRe.MatchString(t) && !srcPosRe.MatchString(t) {
 			continue
 		}
 		k := strings.TrimSpace(t)
@@ -203,4 +207,28 @@ func toolBuild(raw json.RawMessage) (string, error) {
 		b.WriteString("all good")
 	}
 	return b.String(), nil
+}
+
+// venvPython: the project's .venv Python when it has one, else the system's.
+func venvPython(root string) string {
+	if isWin {
+		if p := filepath.Join(root, ".venv", "Scripts", "python.exe"); exists(p) {
+			return p
+		}
+		return "python"
+	}
+	if p := filepath.Join(root, ".venv", "bin", "python"); exists(p) {
+		return p
+	}
+	return "python3"
+}
+
+// gradlew: the project's Gradle wrapper (gradlew.bat on Windows), made runnable.
+func gradlew(root string) string {
+	gw := filepath.Join(root, "gradlew")
+	if isWin && exists(gw+".bat") {
+		return gw + ".bat"
+	}
+	os.Chmod(gw, 0o755)
+	return gw
 }

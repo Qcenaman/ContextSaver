@@ -243,10 +243,19 @@ func secAttrs(sddl string) (*syscall.SecurityAttributes, error) {
 	return &syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), SecurityDescriptor: sd}, nil
 }
 
+func helperInstalled() bool { return taskInstalled() }
+
+// helperHowTo: the one message about a missing admin helper (it can't install itself:
+// that takes the user's one "Yes" in Windows' permission prompt).
+func helperHowTo() string {
+	return "The admin helper isn't installed, so commands that need admin (installing programs, system changes) won't work. " +
+		"To install it once: press Win+R, paste  \"" + installPath() + "\" install-helper  and press Enter, then click Yes in Windows' prompt."
+}
+
 // startHelper starts the admin helper (first step of the "Local AI" icon).
 func startHelper() string {
 	if !taskInstalled() {
-		return "Admin helper isn't installed (run once: contextsaver install-helper)"
+		return "⚠ " + helperHowTo()
 	}
 	if pipeUp() {
 		return "Admin helper running"
@@ -446,7 +455,7 @@ func openElevPipe() (syscall.Handle, error) {
 		switch {
 		case err == syscall.ERROR_FILE_NOT_FOUND:
 			if !taskInstalled() {
-				return 0, errors.New("the elevated helper isn't installed. The user has to run once, in a normal window: \"" + installPath() + "\" install-helper (one UAC prompt)")
+				return 0, errors.New("Tell the user: " + helperHowTo())
 			}
 			if !triedStart {
 				triedStart = true

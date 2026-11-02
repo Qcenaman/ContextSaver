@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-const appVersion = "1.17.1"
+const appVersion = "1.18.0"
 
 func main() {
 	initApp()
@@ -16,6 +16,9 @@ func main() {
 	}
 	switch args[0] {
 	case "start":
+		if len(args) > 1 {
+			os.Exit(consoleStartModel(args[1]))
+		}
 		os.Exit(consoleStartLocalAI())
 	case "stop":
 		os.Exit(consoleStopLocalAI())
@@ -46,6 +49,11 @@ func main() {
 		consoleInstallHelper()
 	case "uninstall-helper":
 		consoleUninstallHelper()
+	case "setup":
+		consoleSetup()
+		waitEnter("Press Enter to close.", 0)
+	case "chat":
+		os.Exit(consoleChat(args[1:]))
 	case "version":
 		fmt.Println("contextsaver", appVersion)
 	case "terminal":

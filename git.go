@@ -208,6 +208,9 @@ func toolGit(raw json.RawMessage) (string, error) {
 		maxChars = 6000
 	}
 
+	if action == "login" || action == "signin" || action == "auth" {
+		return gitLogin()
+	}
 	if action == "clone" {
 		if strings.TrimSpace(a.URL) == "" {
 			return "", errors.New("clone needs url")
@@ -398,7 +401,12 @@ func toolGit(raw json.RawMessage) (string, error) {
 		if err != nil {
 			return b.String(), err
 		}
-		b.WriteString(p)
+		b.WriteString(p + "\n")
+		r, err := publishRelease(root, v, a.Notes)
+		if err != nil {
+			return b.String(), err
+		}
+		b.WriteString(r)
 		return b.String(), nil
 
 	case "handoff":
@@ -429,7 +437,7 @@ func gitPush(root string, timeout time.Duration) (string, error) {
 		hint := ""
 		lo := strings.ToLower(out)
 		if strings.Contains(lo, "authentication") || strings.Contains(lo, "could not read username") || strings.Contains(lo, "403") {
-			hint = "\nSign-in needed: run git push once from the Terminal (double-click TokenSaver) so the browser sign-in can complete, then retry."
+			hint = "\nSign-in needed: git{action:login}, then retry."
 		}
 		return "", fmt.Errorf("git push failed:\n%s%s", gitShort(out, 15), hint)
 	}

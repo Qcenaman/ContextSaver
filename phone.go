@@ -291,6 +291,8 @@ func phoneAction(a map[string]any) string {
 		return "apps"
 	case strings.Contains(act, "status") || strings.Contains(act, "info") || strings.Contains(act, "battery"):
 		return "status"
+	case strings.Contains(act, "log") || strings.Contains(act, "crash"):
+		return "logcat"
 	}
 	return act
 }
@@ -333,6 +335,8 @@ func toolPhoneCmd(a map[string]any) (string, error) {
 		return phoneApps(c, strings.ToLower(str(a, "filter", "query", "package", "name")))
 	case "install":
 		return phoneInstall(c, a)
+	case "logcat":
+		return toolLogcat(a)
 	case "uninstall", "launch":
 		pkg, err := phoneResolvePackage(c, a)
 		if err != nil {
