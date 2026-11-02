@@ -153,7 +153,7 @@ func phoneEngine(c phoneConf, base, tool string, args map[string]any, timeout ti
 	var r struct {
 		Result struct {
 			Content []struct{ Type, Text string } `json:"content"`
-			IsError bool                         `json:"isError"`
+			IsError bool                          `json:"isError"`
 		} `json:"result"`
 		Error *struct{ Message string } `json:"error"`
 	}
@@ -238,7 +238,9 @@ func phoneResolvePackage(c phoneConf, a map[string]any) (string, error) {
 		if !strings.Contains(strings.ToLower(l), strings.ReplaceAll(name, " ", "")) {
 			continue
 		}
-		for _, f := range strings.FieldsFunc(l, func(r rune) bool { return r == ' ' || r == '\t' || r == '(' || r == ')' || r == ',' || r == '=' || r == ':' }) {
+		for _, f := range strings.FieldsFunc(l, func(r rune) bool {
+			return r == ' ' || r == '\t' || r == '(' || r == ')' || r == ',' || r == '=' || r == ':'
+		}) {
 			if pkgRe.MatchString(f) {
 				hits = append(hits, f)
 				break
@@ -466,7 +468,10 @@ var (
 // phoneSource: exactly one of path, url, repo.
 func phoneSource(a map[string]any) (kind, val string, err error) {
 	n := 0
-	for _, k := range []struct{ kind string; keys []string }{{"path", []string{"path", "file", "apk"}}, {"url", []string{"url"}}, {"repo", []string{"repo"}}} {
+	for _, k := range []struct {
+		kind string
+		keys []string
+	}{{"path", []string{"path", "file", "apk"}}, {"url", []string{"url"}}, {"repo", []string{"repo"}}} {
 		if v := strings.TrimSpace(str(a, k.keys...)); v != "" {
 			n++
 			kind, val = k.kind, v

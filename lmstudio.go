@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -107,7 +106,7 @@ func lmsExe() string {
 // lmsKey resolves a ContextSaver name or an LM Studio key to an LM Studio key.
 func lmsKey(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
-	if k, ok := lmsNames[name]; ok {
+	if k := lmsMapped(name); k != "" {
 		return k
 	}
 	ms, _ := lmsModels()
@@ -119,25 +118,16 @@ func lmsKey(name string) string {
 	return ""
 }
 
-func lmsNameList() []string {
-	var ns []string
-	for n := range lmsNames {
-		ns = append(ns, n)
-	}
-	sort.Strings(ns)
-	return ns
-}
-
 func lmsStatus() string {
 	cur := lmsLoaded()
 	var b strings.Builder
 	b.WriteString("LM Studio models:\n")
 	for _, n := range lmsNameList() {
 		mark := ""
-		if lmsNames[n] == cur && cur != "" {
+		if lmsMapped(n) == cur && cur != "" {
 			mark = " [loaded]"
 		}
-		fmt.Fprintf(&b, "%s = %s%s\n", n, lmsNames[n], mark)
+		fmt.Fprintf(&b, "%s = %s%s\n", n, lmsMapped(n), mark)
 	}
 	if cur == "" {
 		b.WriteString("nothing loaded")
@@ -219,7 +209,7 @@ func lmsUse(name string, force bool) (string, error) {
 
 // startModelName: the last-used model (config ai_script), else qwen.
 func startModelName() string {
-	if n := modelForScript(cfg.AIScript); lmsNames[n] != "" {
+	if n := modelForScript(cfg.AIScript); lmsMapped(n) != "" {
 		return n
 	}
 	return "qwen"

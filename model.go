@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,22 +26,6 @@ var defaultModels = map[string]string{
 	"gemma":      `D:\llama.cpp\start-gemma-4-31b.bat`,
 	"qwen-think": `D:\llama.cpp\start-qwen3.6-27b.bat`,
 	"oss-free":   `D:\llama.cpp\start-gpt-oss-120b-derestricted.bat`,
-}
-
-func models() map[string]string {
-	if len(cfg.Models) > 0 {
-		return cfg.Models
-	}
-	return defaultModels
-}
-
-func modelNames() []string {
-	var ns []string
-	for n := range models() {
-		ns = append(ns, n)
-	}
-	sort.Strings(ns)
-	return ns
 }
 
 var aliasRe = regexp.MustCompile(`(?i)--alias[ =]+"?([^\s"^]+)`)
@@ -106,13 +89,6 @@ func currentModel() (name, state string) {
 	return "", "none"
 }
 
-func firstScript() string {
-	if cfg.AIScript != "" {
-		return cfg.AIScript
-	}
-	return models()[modelNames()[0]]
-}
-
 func modelForScript(s string) string {
 	for n, p := range models() {
 		if samePath(p, s) {
@@ -160,43 +136,13 @@ func toolModel(a map[string]any) (string, error) {
 	return "", errors.New("action must be list, use, stop, pin, unpin or idle")
 }
 
-func modelStatus() string {
-	if lmsMode() {
-		return lmsStatus()
-	}
-	cur, st := currentModel()
-	var b strings.Builder
-	for _, n := range modelNames() {
-		s := models()[n]
-		mark := ""
-		if n == cur {
-			mark = " [" + st + "]"
-		}
-		if !exists(s) {
-			mark += " (script missing)"
-		}
-		fmt.Fprintf(&b, "%s%s\n", n, mark)
-	}
-	if cur == "" {
-		b.WriteString("nothing loaded\n")
-	} else if st == "loading" {
-		b.WriteString("loading " + cur + "\n")
-	}
-	_, port := scriptAddr(firstScript())
-	b.WriteString(guardStatusLine("model server", port))
-	if embedHealthy() {
-		b.WriteString("\n" + guardStatusLine("embedding", ragPort))
-	}
-	return strings.TrimSpace(b.String())
-}
-
 func useModel(name string, waitSecs int, force bool) (string, error) {
 	if lmsMode() {
 		return lmsUse(name, force)
 	}
-	s, ok := models()[name]
-	if !ok {
-		return "", fmt.Errorf("unknown model %q; have: %s", name, strings.Join(modelNames(), ", "))
+	s, err := resolveModel(name)
+	if err != nil {
+		return "", err
 	}
 	if !exists(s) {
 		return "", errors.New("script not found: " + s)
@@ -219,6 +165,9 @@ func useModel(name string, waitSecs int, force bool) (string, error) {
 		what += " (" + strings.Join(uniq(served), ",") + ")"
 	}
 	refuse := func(why string) (string, error) {
+		if d := guardProcDesc(port); d != "" {
+			what += " [" + d + "]"
+		}
 		return "", fmt.Errorf("not switching to %s: %s %s. It was left running", name, what, why)
 	}
 	if st, _ := inspectServer(port); st.Up || st.Owner != ownerNone {
@@ -406,46 +355,6 @@ func aiServerUp() bool {
 }
 
 func portOpen(port int) bool { return pidOnPort(port) > 0 }
-
-// consoleModel: contextsaver model [qwen|oss|…|stop|list|pin|unpin] [--force]
-func consoleModel(args []string) int {
-	if len(args) == 0 || args[0] == "list" || args[0] == "status" {
-		fmt.Println(modelStatus())
-		return 0
-	}
-	force := len(args) > 1 && args[1] == "--force"
-	if args[0] == "stop" {
-		fmt.Println(stopModel(force))
-		return 0
-	}
-	if args[0] == "pin" || args[0] == "unpin" {
-		out, _ := toolModel(map[string]any{"action": args[0]})
-		fmt.Println(out)
-		return 0
-	}
-	fmt.Println("Loading", args[0], "…")
-	out, err := useModel(args[0], 600, force)
-	if err != nil {
-		fmt.Println(err)
-		waitEnter("Press Enter to close.", 0)
-		return 1
-	}
-	fmt.Println(out + syncFrontends())
-	return 0
-}
-
-// writeModelShortcuts puts one double-click file per model in the app folder.
-func writeModelShortcuts(exe string) {
-	if !isWin {
-		return
-	}
-	dir := appRoot()
-	os.MkdirAll(dir, 0o755)
-	for _, n := range modelNames() {
-		os.WriteFile(filepath.Join(dir, "Use model - "+n+".cmd"), []byte("@\""+exe+"\" model "+n+"\r\n@timeout /t 4 >nul\r\n"), 0o644)
-	}
-	os.WriteFile(filepath.Join(dir, "Stop model.cmd"), []byte("@\""+exe+"\" model stop\r\n@timeout /t 3 >nul\r\n"), 0o644)
-}
 
 func stoppedNote(stopped []string) string {
 	if len(stopped) == 0 {

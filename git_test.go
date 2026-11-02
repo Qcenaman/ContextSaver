@@ -58,4 +58,3 @@ func TestBuildPlanDetectsGoAndErrLines(t *testing.T) {
 		t.Fatalf("err lines: %q", lines)
 	}
 }
-
