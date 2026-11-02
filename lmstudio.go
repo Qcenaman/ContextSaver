@@ -127,8 +127,9 @@ func lmsStatus() string {
 		if lmsMapped(n) == cur && cur != "" {
 			mark = " [loaded]"
 		}
-		fmt.Fprintf(&b, "%s = %s%s\n", n, lmsMapped(n), mark)
+		fmt.Fprintf(&b, "%s = %s%s%s\n", n, lmsMapped(n), mark, modelDesc(n))
 	}
+	b.WriteString(modelFileNotes())
 	if cur == "" {
 		b.WriteString("nothing loaded")
 	}
@@ -156,6 +157,9 @@ func lmsServerStart() error {
 // answering a request, so a model loaded elsewhere (RemoteAI, LM Studio itself) is
 // never replaced on its own.
 func lmsUse(name string, force bool) (string, error) {
+	if err := modelFileCheck(name); err != nil {
+		return "", err
+	}
 	if _, up := lmsModels(); !up {
 		if err := lmsServerStart(); err != nil {
 			return "", err

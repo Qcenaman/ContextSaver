@@ -522,13 +522,10 @@ func firstScript() string {
 
 // resolveModel gives the start script for name, or says plainly what is wrong.
 func resolveModel(name string) (string, error) {
-	set, err := loadModels()
-	if err != nil {
-		return "", fmt.Errorf("not switching, the models file has a problem: %v", err)
+	if err := modelFileCheck(name); err != nil {
+		return "", err
 	}
-	if msg, ok := set.bad[name]; ok {
-		return "", fmt.Errorf("can't use %s, its entry in %s has a problem: %s", name, modelsPath(), msg)
-	}
+	set, _ := loadModels()
 	s, ok := set.scripts[name]
 	if !ok {
 		return "", fmt.Errorf("unknown model %q; have: %s (the list is in %s)", name, strings.Join(set.order, ", "), modelsPath())
@@ -551,12 +548,9 @@ func modelStatus() string {
 	if lmsMode() {
 		return lmsStatus()
 	}
-	set, ferr := loadModels()
+	set, _ := loadModels()
 	cur, st := currentModel()
 	var b strings.Builder
-	if ferr != nil {
-		fmt.Fprintf(&b, "%v\nuntil it is fixed the built-in list is shown and switching is refused\n", ferr)
-	}
 	for _, n := range modelNames() {
 		s := models()[n]
 		mark := ""
@@ -578,12 +572,7 @@ func modelStatus() string {
 		}
 		fmt.Fprintf(&b, "%s%s\n", n, mark)
 	}
-	if set != nil && len(set.problems) > 0 {
-		b.WriteString("problems in models.json (not usable until fixed):\n")
-		for _, p := range set.problems {
-			b.WriteString("  " + p + "\n")
-		}
-	}
+	b.WriteString(modelFileNotes())
 	if cur == "" {
 		b.WriteString("nothing loaded\n")
 	} else if st == "loading" {
@@ -595,6 +584,44 @@ func modelStatus() string {
 		b.WriteString("\n" + guardStatusLine("embedding", ragPort))
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// modelFileNotes: what is wrong with models.json, for model lists ("" when all is well).
+func modelFileNotes() string {
+	set, err := loadModels()
+	if err != nil {
+		return fmt.Sprintf("%v\nuntil it is fixed the built-in list is shown and switching is refused\n", err)
+	}
+	if len(set.problems) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("problems in models.json (not usable until fixed):\n")
+	for _, p := range set.problems {
+		b.WriteString("  " + p + "\n")
+	}
+	return b.String()
+}
+
+// modelFileCheck refuses a switch when models.json is broken or name's entry has a problem.
+func modelFileCheck(name string) error {
+	set, err := loadModels()
+	if err != nil {
+		return fmt.Errorf("not switching, the models file has a problem: %v", err)
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if msg, ok := set.bad[name]; ok {
+		return fmt.Errorf("can't use %s, its entry in %s has a problem: %s", name, modelsPath(), msg)
+	}
+	return nil
+}
+
+// modelDesc is " - <description>" for list lines.
+func modelDesc(n string) string {
+	if set, err := loadModels(); err == nil && set.entries[n].Description != "" {
+		return " - " + set.entries[n].Description
+	}
+	return ""
 }
 
 // guardProcDesc names the program listening on port, for refusals.

@@ -127,6 +127,12 @@ func TestModelFileBadFile(t *testing.T) {
 		if len(models()) == 0 {
 			t.Fatal("no fallback list")
 		}
+		if _, err := lmsUse("a", false); err == nil || !strings.Contains(err.Error(), "models file has a problem") {
+			t.Fatalf("LM Studio switch allowed with a broken file: %v", err)
+		}
+		if !strings.Contains(modelFileNotes(), "switching is refused") {
+			t.Fatal("list doesn't show the file problem")
+		}
 	}
 }
 
