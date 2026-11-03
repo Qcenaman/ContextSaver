@@ -447,6 +447,12 @@ func (u *chatUI) runTool(ctx context.Context, tc chatToolCall) string {
 		}
 		approved = true
 	}
+	if q := repoQuestion(c, a); q != "" {
+		fmt.Print(u.paint("1;33", "  "+q+" [y/N] "))
+		ans, _ := u.in.ReadString('\n')
+		ans = strings.ToLower(strings.TrimSpace(ans))
+		a["update"] = ans == "y" || ans == "yes"
+	}
 	if approved && (c == "run" || compactAlias[c] == "run") {
 		a["confirmed"] = true
 	}

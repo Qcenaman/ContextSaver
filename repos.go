@@ -5,10 +5,13 @@ package main
 // search, read and compare code without pulling files into its small context.
 // ContextSaver keeps its own temporary copies in data\repos\<owner>\<name>: partial
 // clones (small, but with the history for tags and compare), and one <name>@<ref>
-// worktree per ref sharing the same objects. A copy is refreshed when it is more than
-// 5 minutes old, deleted by ContextSaver itself after 24 hours unused, and results
-// show owner/name/... instead of the local folder. The copies are read-only for git:
-// commit, push and release are refused there.
+// worktree per ref sharing the same objects. A repo is cloned only when a call needs
+// it, and a copy that is here already is never updated on its own: when GitHub has
+// newer commits for it, the call answers with a question for the user (update it, or
+// use it as it is) and runs once called again with update:true or update:false; git
+// pull on owner/name updates it right away. Copies unused for 24 hours are deleted by
+// ContextSaver itself, and results show owner/name/... instead of the local folder.
+// The copies are read-only for git: commit, push and release are refused there.
 
 import (
 	"encoding/json"
@@ -27,10 +30,10 @@ var (
 	repoRemoteBase = "https://github.com/" // tests point it at local bare repos
 	repoWait       = 45 * time.Second      // a call waits this long for a first clone, then says "call again"
 	repoAutoClean  = true                  // the background cleanup (tests turn it off)
+	repoCheckFor   = 2 * time.Minute       // one look at GitHub's newest commit serves the calls this long
 )
 
 const (
-	repoFresh     = 5 * time.Minute // older copies are fetched again before use
 	repoMaxIdle   = 24 * time.Hour  // copies unused this long are deleted
 	repoLockStale = 2 * time.Minute // a lock whose holder stopped refreshing it
 	repoReadOnly  = "temporary GitHub copies (owner/name paths) are read-only: commit, push and release are refused there; clone the repo to your own folder (git{action:clone,url,to}) to change it"
@@ -42,8 +45,10 @@ func reposDir() string { return filepath.Join(appHome, "repos") }
 type repoSpec struct{ Owner, Name, Ref, Sub string }
 
 var (
-	repoSpecRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?(?:@([^/\\\s]+))?(?:[/\\](.*))?$`)
-	repoSHARe  = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
+	repoSpecRe  = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?(?:@([^/\\\s]+))?(?:[/\\](.*))?$`)
+	repoSHARe   = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
+	repoFullSHA = regexp.MustCompile(`^[0-9a-fA-F]{40,64}$`)
+	repoRefRe   = regexp.MustCompile(`^[A-Za-z0-9._/+-]{1,200}$`)
 )
 
 // parseRepoSpec reads owner/name[@ref][/sub], also written github.com/... or as a GitHub
@@ -95,8 +100,13 @@ func parseRepoSpec(p string) (repoSpec, bool) {
 	return s, true
 }
 
+// validRepoRef: a branch, tag or commit name that is safe to hand to git and a shell.
 func validRepoRef(r string) bool {
-	return r == "" || !(strings.HasPrefix(r, "-") || strings.Contains(r, "..") || strings.Contains(r, "@{") || strings.ContainsAny(r, " ~^:?*[\\") || strings.HasSuffix(r, ".lock") || strings.HasSuffix(r, ".") || r == "@")
+	if r == "" {
+		return true
+	}
+	return repoRefRe.MatchString(r) && !strings.HasPrefix(r, "-") && !strings.HasPrefix(r, "/") && !strings.HasSuffix(r, "/") &&
+		!strings.Contains(r, "..") && !strings.Contains(r, "//") && !strings.HasSuffix(r, ".lock") && !strings.HasSuffix(r, ".")
 }
 
 func (s repoSpec) repo() string { return s.Owner + "/" + s.Name }
@@ -156,9 +166,10 @@ func (s repoSpec) remember() {
 
 // repoState sits next to each copy as <copy>.json.
 type repoState struct {
-	Repo    string    `json:"repo"`
-	Fetched time.Time `json:"fetched"`
-	Used    time.Time `json:"used"`
+	Repo     string    `json:"repo"`
+	Fetched  time.Time `json:"fetched"` // cloned or last updated
+	Used     time.Time `json:"used"`
+	Declined string    `json:"declined,omitempty"` // GitHub's commit the user chose not to update to
 }
 
 func readRepoState(dir string) repoState {
@@ -227,6 +238,26 @@ type repoBusy struct{ msg string }
 
 func (e repoBusy) Error() string { return e.msg }
 
+// repoAsk: GitHub has newer commits than a copy here and the user hasn't said whether
+// to update it; the call answers with this question instead of running.
+type repoAsk struct{ msg string }
+
+func (e repoAsk) Error() string { return e.msg }
+
+// repoMsg: what a call answers instead of its result while a repo isn't ready yet
+// (still cloning) or the user has to decide first (update it or not).
+func repoMsg(err error) (string, bool) {
+	var busy repoBusy
+	if errors.As(err, &busy) {
+		return busy.msg, true
+	}
+	var ask repoAsk
+	if errors.As(err, &ask) {
+		return ask.msg, true
+	}
+	return "", false
+}
+
 type repoJob struct {
 	done chan struct{}
 	what string
@@ -236,14 +267,24 @@ type repoJob struct {
 
 var repoJobs sync.Map // copy folder -> *repoJob running in this process
 
-// ensureRepo gets the copy ready (clone, refresh, worktree) and returns its folder. A
-// call waits up to repoWait; a big first clone carries on in the background and a
-// later call picks it up.
-func ensureRepo(s repoSpec) (dir, note string, err error) {
+// repoPrep: what getting a copy ready may do besides cloning what is missing.
+type repoPrep struct {
+	update   bool   // fetch and move the copy to GitHub's newest commit
+	strict   bool   // a failed update is an error (git pull), not a note
+	declined string // GitHub's commit the user chose not to update to
+}
+
+// ensureRepo gets the copy ready (clone, worktree, the update asked for) and returns
+// its folder. A call waits up to repoWait; a big clone carries on in the background
+// and a later call picks it up.
+func ensureRepo(s repoSpec, o repoPrep) (dir, note string, err error) {
 	key := strings.ToLower(s.copyDir())
-	j := &repoJob{done: make(chan struct{}), what: "updating"}
-	if !exists(s.mainDir()) {
+	j := &repoJob{done: make(chan struct{}), what: "preparing"}
+	switch {
+	case !exists(s.mainDir()):
 		j.what = "cloning"
+	case o.update:
+		j.what = "updating"
 	}
 	if v, running := repoJobs.LoadOrStore(key, j); running {
 		j = v.(*repoJob)
@@ -256,7 +297,7 @@ func ensureRepo(s repoSpec) (dir, note string, err error) {
 				repoJobs.Delete(key)
 				close(j.done)
 			}()
-			j.note, j.err = prepareRepo(s)
+			j.note, j.err = prepareRepo(s, o)
 		}(j)
 	}
 	select {
@@ -272,28 +313,44 @@ func ensureRepo(s repoSpec) (dir, note string, err error) {
 	}
 }
 
-// prepareRepo clones or refreshes the main copy and, for @ref, its worktree, holding
-// the repo's lock so two calls (or two ContextSaver processes) never clone at once.
-func prepareRepo(s repoSpec) (note string, err error) {
+// prepareRepo clones what is missing and makes the update asked for, holding the
+// repo's lock so two calls (or two ContextSaver processes) never clone at once.
+func prepareRepo(s repoSpec, o repoPrep) (note string, err error) {
 	main := s.mainDir()
 	unlock, err := lockRepo(main, 15*time.Minute)
 	if err != nil {
 		return "", fmt.Errorf("%s is busy in another ContextSaver; call again", s.repo())
 	}
 	defer unlock()
+	// failed: an update that didn't work is an error for git pull; otherwise a note,
+	// and the copy is used as it is
+	failed := func(what string, err error, since time.Time) error {
+		if o.strict {
+			return fmt.Errorf("couldn't update %s: %s", what, clip1(err.Error(), 200))
+		}
+		note = staleNote(what, err, since)
+		return nil
+	}
 	now := time.Now()
 	ms := readRepoState(main)
+	cloned := false
 	if !isGitCopy(main) {
 		if err := cloneRepo(s, main); err != nil {
 			return "", err
 		}
-		ms = repoState{Fetched: time.Now()}
-	} else if time.Since(ms.Fetched) >= repoFresh {
+		ms, cloned = repoState{Fetched: time.Now()}, true
+	} else if o.update && s.Ref == "" {
 		if err := refreshMain(main); err != nil {
-			note = staleNote(s.repo(), err, ms.Fetched)
+			if err := failed(s.repo(), err, ms.Fetched); err != nil {
+				return "", err
+			}
 		} else {
-			ms.Fetched = time.Now()
+			ms.Fetched, ms.Declined = time.Now(), ""
 		}
+		repoForget(main)
+	}
+	if s.Ref == "" && o.declined != "" {
+		ms.Declined = o.declined
 	}
 	ms.Repo, ms.Used = s.repo(), now
 	writeRepoState(main, ms)
@@ -302,19 +359,32 @@ func prepareRepo(s repoSpec) (note string, err error) {
 	}
 	wt := s.copyDir()
 	ws := readRepoState(wt)
-	if !isGitCopy(wt) {
+	switch {
+	case !isGitCopy(wt):
+		// a new copy of a branch starts at GitHub's newest commit on it
+		if !cloned && (o.update || repoIsBranch(main, s.Ref)) {
+			if err := fetchMain(main); err != nil {
+				if err := failed(s.display(), err, ms.Fetched); err != nil {
+					return "", err
+				}
+			}
+		}
 		if err := addWorktree(s, main, wt); err != nil {
 			return note, err
 		}
 		ws = repoState{Fetched: time.Now()}
-	} else if time.Since(ws.Fetched) >= repoFresh {
-		if err := moveWorktree(s, main, wt); err != nil {
-			if note == "" {
-				note = staleNote(s.display(), err, ws.Fetched)
+	case o.update:
+		if err := updateWorktree(s, main, wt); err != nil {
+			if err := failed(s.display(), err, ws.Fetched); err != nil {
+				return "", err
 			}
 		} else {
-			ws.Fetched = time.Now()
+			ws.Fetched, ws.Declined = time.Now(), ""
 		}
+		repoForget(wt)
+	}
+	if o.declined != "" {
+		ws.Declined = o.declined
 	}
 	ws.Repo, ws.Used = s.display(), now
 	writeRepoState(wt, ws)
@@ -322,7 +392,14 @@ func prepareRepo(s repoSpec) (note string, err error) {
 }
 
 func staleNote(what string, err error, since time.Time) string {
-	return fmt.Sprintf("(couldn't update %s: %s; using the copy from %s)", what, clip1(err.Error(), 160), since.Local().Format("2006-01-02 15:04"))
+	return fmt.Sprintf("(couldn't update %s: %s; using the copy from %s)", what, clip1(err.Error(), 160), repoWhen(since))
+}
+
+func repoWhen(t time.Time) string {
+	if t.IsZero() {
+		return "earlier"
+	}
+	return t.Local().Format("2006-01-02 15:04")
 }
 
 func gitNet(args ...string) []string { return append(append([]string{}, gitNetFlags...), args...) }
@@ -374,12 +451,20 @@ func cloneRepo(s repoSpec, main string) error {
 	return fmt.Errorf("couldn't set up the copy of %s: %v", s.repo(), rerr)
 }
 
-// refreshMain fetches and fast-forwards the main copy, or resets it to origin when the
-// branch's history was rewritten.
-func refreshMain(main string) error {
+// fetchMain gets GitHub's new commits into the main copy without changing any files.
+func fetchMain(main string) error {
 	out, code, err := gitExec(main, 10*time.Minute, gitNet("fetch", "--prune", "--tags", "--force", "--quiet", "origin")...)
 	if err != nil || code != 0 {
 		return errors.New(repoGitErr(out, err))
+	}
+	return nil
+}
+
+// refreshMain fetches and fast-forwards the main copy, or resets it to origin when the
+// branch's history was rewritten.
+func refreshMain(main string) error {
+	if err := fetchMain(main); err != nil {
+		return err
 	}
 	if _, code, _ := gitExec(main, 20*time.Second, "rev-parse", "-q", "--verify", "@{u}"); code != 0 {
 		return nil // no branch to follow
@@ -387,18 +472,23 @@ func refreshMain(main string) error {
 	if _, code, _ := gitExec(main, 5*time.Minute, gitNet("merge", "--ff-only", "--quiet", "@{u}")...); code == 0 {
 		return nil
 	}
-	out, code, err = gitExec(main, 5*time.Minute, gitNet("reset", "--hard", "--quiet", "@{u}")...)
+	out, code, err := gitExec(main, 5*time.Minute, gitNet("reset", "--hard", "--quiet", "@{u}")...)
 	if err != nil || code != 0 {
 		return errors.New(repoGitErr(out, err))
 	}
 	return nil
 }
 
+func repoIsBranch(main, ref string) bool {
+	_, code, _ := gitExec(main, 20*time.Second, "rev-parse", "-q", "--verify", "refs/remotes/origin/"+ref)
+	return code == 0
+}
+
 // resolveRef finds the ref in the main copy as a branch (origin/<ref>), a tag or a
 // commit, fetching once more when it isn't there yet.
 func resolveRef(s repoSpec, main string) (string, error) {
 	try := func() string {
-		if _, code, _ := gitExec(main, 20*time.Second, "rev-parse", "-q", "--verify", "refs/remotes/origin/"+s.Ref); code == 0 {
+		if repoIsBranch(main, s.Ref) {
 			return "refs/remotes/origin/" + s.Ref
 		}
 		if _, code, _ := gitExec(main, 20*time.Second, "rev-parse", "-q", "--verify", "refs/tags/"+s.Ref+"^{commit}"); code == 0 {
@@ -443,7 +533,7 @@ func addWorktree(s repoSpec, main, wt string) error {
 	return nil
 }
 
-// moveWorktree brings a @ref copy to what the ref means now (a branch moves on).
+// moveWorktree checks a @ref copy out at what the ref means in the main copy now.
 func moveWorktree(s repoSpec, main, wt string) error {
 	target, err := resolveRef(s, main)
 	if err != nil {
@@ -454,6 +544,14 @@ func moveWorktree(s repoSpec, main, wt string) error {
 		return errors.New(repoGitErr(out, err))
 	}
 	return nil
+}
+
+// updateWorktree fetches and moves a @ref copy to what the ref means on GitHub now.
+func updateWorktree(s repoSpec, main, wt string) error {
+	if err := fetchMain(main); err != nil {
+		return err
+	}
+	return moveWorktree(s, main, wt)
 }
 
 func repoGitErr(out string, err error) string {
@@ -472,6 +570,187 @@ func repoGitErr(out string, err error) string {
 	return gitShort(out, 4)
 }
 
+// ---------- is GitHub newer than a copy? ----------
+
+type repoRemote struct {
+	at  time.Time
+	sha string
+	err error
+}
+
+var repoRemotes sync.Map // copy folder (lower case) -> repoRemote
+
+func repoForget(dir string) { repoRemotes.Delete(strings.ToLower(dir)) }
+
+// repoFollows: the GitHub refs a copy follows: its branch, or the tag (and the commit
+// it points at); none for a commit, which never changes.
+func repoFollows(s repoSpec) []string {
+	main := s.mainDir()
+	if s.Ref == "" {
+		br, code, _ := gitExec(main, 20*time.Second, "rev-parse", "--abbrev-ref", "HEAD")
+		if br = strings.TrimSpace(br); code != 0 || br == "" || br == "HEAD" {
+			return nil
+		}
+		return []string{"refs/heads/" + br}
+	}
+	if repoIsBranch(main, s.Ref) {
+		return []string{"refs/heads/" + s.Ref}
+	}
+	if _, code, _ := gitExec(main, 20*time.Second, "rev-parse", "-q", "--verify", "refs/tags/"+s.Ref); code == 0 {
+		return []string{"refs/tags/" + s.Ref, "refs/tags/" + s.Ref + "^{}"}
+	}
+	return nil
+}
+
+// repoBehind: whether GitHub has a newer commit than the copy for what it follows,
+// found with git ls-remote, which changes nothing here. remote = GitHub's commit.
+func repoBehind(s repoSpec) (behind bool, remote string, err error) {
+	dir := s.copyDir()
+	local, code, _ := gitExec(dir, 20*time.Second, "rev-parse", "HEAD")
+	if local = strings.TrimSpace(local); code != 0 || local == "" {
+		return false, "", nil
+	}
+	key := strings.ToLower(dir)
+	r, fresh := repoRemote{}, false
+	if v, ok := repoRemotes.Load(key); ok {
+		r = v.(repoRemote)
+		fresh = time.Since(r.at) < repoCheckFor
+	}
+	if !fresh {
+		refs := repoFollows(s)
+		if len(refs) == 0 {
+			return false, "", nil
+		}
+		out, code, err := gitExec(s.mainDir(), 30*time.Second, gitNet(append([]string{"ls-remote", "origin"}, refs...)...)...)
+		r = repoRemote{at: time.Now()}
+		if err != nil || code != 0 {
+			r.err = errors.New(repoGitErr(out, err))
+		} else {
+			r.sha = lsRemoteSHA(out)
+		}
+		repoRemotes.Store(key, r)
+	}
+	return r.err == nil && r.sha != "" && !strings.EqualFold(r.sha, local), r.sha, r.err
+}
+
+// lsRemoteSHA: the commit in git ls-remote output (a tag's peeled ^{} line wins).
+func lsRemoteSHA(out string) string {
+	sha := ""
+	for _, l := range strings.Split(out, "\n") {
+		f := strings.Fields(l)
+		if len(f) != 2 || !repoFullSHA.MatchString(f[0]) {
+			continue
+		}
+		if strings.HasSuffix(f[1], "^{}") {
+			return f[0]
+		}
+		if sha == "" {
+			sha = f[0]
+		}
+	}
+	return sha
+}
+
+// repoCheck sorts a call's repos: what each one needs (what is missing is cloned, an
+// update only when update says the user wants it), and, while update is nil, the copies
+// to ask about: those GitHub has newer commits for, unless the user already said no
+// to that commit.
+func repoCheck(specs []repoSpec, update *bool) (preps []repoPrep, ask, notes []string) {
+	preps = make([]repoPrep, len(specs))
+	for i, s := range specs {
+		dir := s.copyDir()
+		if _, running := repoJobs.Load(strings.ToLower(dir)); running || !isGitCopy(dir) {
+			continue // being cloned or updated now, or not here yet
+		}
+		behind, remote, err := repoBehind(s)
+		st := readRepoState(dir)
+		switch {
+		case err != nil:
+			if update != nil && *update {
+				preps[i].update = true
+			} else if update == nil {
+				notes = append(notes, fmt.Sprintf("(couldn't check GitHub for newer commits of %s: %s; using the copy from %s)", s.display(), clip1(err.Error(), 120), repoWhen(st.Fetched)))
+			}
+		case !behind:
+		case update != nil && *update:
+			preps[i].update = true
+		case update != nil:
+			preps[i].declined = remote
+		case !strings.EqualFold(remote, st.Declined):
+			ask = append(ask, s.display()+" (from "+repoWhen(st.Fetched)+")")
+		}
+	}
+	return preps, ask, notes
+}
+
+func repoQuestionText(ask []string) string {
+	if len(ask) == 1 {
+		return "GitHub has newer commits than the copy here of " + ask[0] + ". Ask the user whether to update it first, then call again with the same args plus update:true (update it) or update:false (use it as it is)."
+	}
+	return "GitHub has newer commits than the copies here of " + strings.Join(ask, ", ") + ". Ask the user whether to update them first, then call again with the same args plus update:true (update them) or update:false (use them as they are)."
+}
+
+// repoGet gets the copies for specs ready: what is missing is cloned, and a copy that
+// is here already is only updated when update says the user wants it. While GitHub has
+// newer commits for a copy and the user hasn't answered, it returns repoAsk.
+func repoGet(specs []repoSpec, update *bool) (note string, err error) {
+	specs = uniqueSpecs(specs)
+	preps, ask, notes := repoCheck(specs, update)
+	if len(ask) > 0 {
+		return "", repoAsk{repoQuestionText(ask)}
+	}
+	for i, s := range specs {
+		_, n, err := ensureRepo(s, preps[i])
+		if err != nil {
+			return "", err
+		}
+		if n != "" {
+			notes = append(notes, n)
+		}
+	}
+	if len(notes) > 0 {
+		note = strings.Join(notes, "\n") + "\n"
+	}
+	return note, nil
+}
+
+// uniqueSpecs: one entry per copy (o/n/a.go and o/n/b.go both use o/n).
+func uniqueSpecs(specs []repoSpec) []repoSpec {
+	seen := map[string]bool{}
+	var out []repoSpec
+	for _, s := range specs {
+		s.Sub = ""
+		if k := strings.ToLower(s.copyDir()); !seen[k] {
+			seen[k] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// repoAnswer reads the update argument, the user's answer to repoAsk: true, false, or
+// nil when it isn't given.
+func repoAnswer(v any) *bool {
+	var b bool
+	switch x := v.(type) {
+	case bool:
+		b = x
+	case float64:
+		b = x != 0
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true", "yes", "y", "1":
+			b = true
+		case "false", "no", "n", "0":
+		default:
+			return nil
+		}
+	default:
+		return nil
+	}
+	return &b
+}
+
 // ---------- tool arguments and results ----------
 
 // repoArgKeys: the arguments of a tool that are paths and may name a GitHub repo.
@@ -485,7 +764,7 @@ func repoArgKeys(tool string, a map[string]any) []string {
 		}
 	case "git":
 		switch strings.ToLower(str(a, "action")) {
-		case "", "status", "log", "diff", "pull", "ci", "actions", "handoff":
+		case "", "status", "log", "diff", "ci", "actions", "handoff":
 			return []string{"path"}
 		case "compare":
 			return []string{"path", "to"}
@@ -494,10 +773,37 @@ func repoArgKeys(tool string, a map[string]any) []string {
 	return nil
 }
 
+// repoSpecsIn: the GitHub repos named in a call's path arguments.
+func repoSpecsIn(tool string, a map[string]any) []repoSpec {
+	var specs []repoSpec
+	add := func(v any) {
+		if p, ok := v.(string); ok {
+			if s, ok := parseRepoSpec(p); ok {
+				specs = append(specs, s)
+			}
+		}
+	}
+	for _, k := range repoArgKeys(tool, a) {
+		switch v := a[k].(type) {
+		case []any:
+			for _, x := range v {
+				add(x)
+			}
+		case []string:
+			for _, x := range v {
+				add(x)
+			}
+		default:
+			add(v)
+		}
+	}
+	return specs
+}
+
 // repoPaths swaps owner/name[@ref][/sub] paths in a call's arguments for the local
-// copies, getting or refreshing them first. show (nil when no repo was named) writes
-// the copies' folders in a result as owner/name/...; note tells of a copy that could
-// not be updated.
+// copies, getting them first (repoGet). show (nil when no repo was named) writes the
+// copies' folders in a result as owner/name/...; note tells of a copy that couldn't be
+// checked or updated.
 func repoPaths(tool string, a map[string]any) (show func(string) string, note string, err error) {
 	if tool == "git" {
 		switch strings.ToLower(str(a, "action")) {
@@ -507,60 +813,43 @@ func repoPaths(tool string, a map[string]any) (show func(string) string, note st
 			}
 		}
 	}
-	var notes []string
-	used := false
-	conv := func(v string) (string, error) {
+	specs := repoSpecsIn(tool, a)
+	if len(specs) == 0 {
+		return nil, "", nil
+	}
+	update := repoAnswer(a["update"])
+	delete(a, "update")
+	if note, err = repoGet(specs, update); err != nil {
+		return nil, "", err
+	}
+	conv := func(v string) string {
 		s, ok := parseRepoSpec(v)
 		if !ok {
-			return v, nil
-		}
-		dir, n, err := ensureRepo(s)
-		if err != nil {
-			return v, err
-		}
-		used = true
-		if n != "" {
-			notes = append(notes, n)
+			return v
 		}
 		if s.Sub == "" {
-			return dir, nil
+			return s.copyDir()
 		}
-		p := filepath.Join(dir, filepath.FromSlash(s.Sub))
-		if !hasPathPrefix(p, dir) {
-			return v, fmt.Errorf("%s leaves the repo", v)
-		}
-		return p, nil
+		return filepath.Join(s.copyDir(), filepath.FromSlash(s.Sub))
 	}
 	for _, k := range repoArgKeys(tool, a) {
 		switch v := a[k].(type) {
 		case string:
-			if a[k], err = conv(v); err != nil {
-				return nil, "", err
-			}
+			a[k] = conv(v)
 		case []string:
 			for i := range v {
-				if v[i], err = conv(v[i]); err != nil {
-					return nil, "", err
-				}
+				v[i] = conv(v[i])
 			}
 		case []any:
 			for i := range v {
-				if s, ok := v[i].(string); ok {
-					if v[i], err = conv(s); err != nil {
-						return nil, "", err
-					}
+				if p, ok := v[i].(string); ok {
+					v[i] = conv(p)
 				}
 			}
 		}
 	}
-	if !used {
-		return nil, "", nil
-	}
 	if tool == "scan" && str(a, "exclude") == "" {
 		a["exclude"] = ".git" // a copy's Git data is noise in an overview
-	}
-	if len(notes) > 0 {
-		note = strings.Join(notes, "\n") + "\n"
 	}
 	return repoShow, note, nil
 }
@@ -569,9 +858,8 @@ func repoPaths(tool string, a map[string]any) (show func(string) string, note st
 func repoRun(tool string, a map[string]any, f func() (string, error)) (string, error) {
 	show, note, err := repoPaths(tool, a)
 	if err != nil {
-		var busy repoBusy
-		if errors.As(err, &busy) {
-			return busy.msg, nil
+		if msg, ok := repoMsg(err); ok {
+			return msg, nil
 		}
 		return "", err
 	}
@@ -603,6 +891,49 @@ func repoCall(tool string, args json.RawMessage) (json.RawMessage, func(string) 
 		return args, nil, "", err
 	}
 	return b, show, note, nil
+}
+
+// repoTool: the tool whose path arguments a pc command takes, for repo paths.
+func repoTool(c string) string {
+	switch c = strings.ToLower(c); c {
+	case "outline", "symbols":
+		return "outline"
+	case "test", "tests", "compile", "build":
+		return "check"
+	}
+	switch t := compactAlias[c]; t {
+	case "find", "scan", "read", "check", "git":
+		return t
+	}
+	return ""
+}
+
+// repoQuestion is for ContextSaver Chat, which asks the user itself: what a pc call
+// would stop to ask (GitHub has newer commits than a copy here), or "".
+func repoQuestion(c string, a map[string]any) string {
+	if repoAnswer(a["update"]) != nil {
+		return ""
+	}
+	tool := repoTool(c)
+	specs := repoSpecsIn(tool, a)
+	if tool == "git" && strings.EqualFold(str(a, "action"), "clone") {
+		src, to := str(a, "url"), str(a, "to")
+		if src == "" {
+			src = str(a, "path")
+		} else if to == "" {
+			to = str(a, "path")
+		}
+		if s, ok := parseRepoSpec(src); ok && to == "" {
+			specs = append(specs, s)
+		}
+	}
+	if len(specs) == 0 {
+		return ""
+	}
+	if _, ask, _ := repoCheck(uniqueSpecs(specs), nil); len(ask) > 0 {
+		return "GitHub has newer commits than the copy of " + strings.Join(ask, ", ") + ": update first?"
+	}
+	return ""
 }
 
 var repoShowCache struct {
@@ -646,8 +977,9 @@ func repoShowRe() *regexp.Regexp {
 		}
 		alts = append(alts, alt)
 	}
+	// one segment: no spaces, so a path never runs into the next one on the line
 	seg := `[^\\/\s"'<>|*?:]+`
-	repoShowCache.re = regexp.MustCompile(`(?i)(?:` + strings.Join(alts, "|") + `)[\\/]+(` + seg + `)[\\/]+(` + seg + `)((?:[\\/]+` + seg + `(?: ` + seg + `)*)*)[\\/]*`)
+	repoShowCache.re = regexp.MustCompile(`(?i)(?:` + strings.Join(alts, "|") + `)[\\/]+(` + seg + `)[\\/]+(` + seg + `)((?:[\\/]+` + seg + `)*)[\\/]*`)
 	repoShowCache.key = base + "\x00" + rp
 	return repoShowCache.re
 }
@@ -685,11 +1017,11 @@ func isRepoCopy(p string) bool {
 	return false
 }
 
-// ---------- git clone ----------
+// ---------- git clone, git pull ----------
 
 // gitClone clones into to; an existing clone of the same repo there is updated with
 // pull --ff-only instead of failing. Without to (and path) a GitHub repo goes to the
-// temporary copies. Returns the path, branch and last commit.
+// temporary copies, asked about like any other use. Returns path, branch and last commit.
 func gitClone(a gitArgs) (string, error) {
 	src, to := strings.TrimSpace(a.URL), strings.TrimSpace(a.To)
 	if src == "" {
@@ -715,15 +1047,14 @@ func gitClone(a gitArgs) (string, error) {
 			return "", fmt.Errorf("bad ref %q", spec.Ref)
 		}
 		spec.Sub = ""
-		dir, note, err := ensureRepo(spec)
+		note, err := repoGet([]repoSpec{spec}, repoAnswer(a.Update))
 		if err != nil {
-			var busy repoBusy
-			if errors.As(err, &busy) {
-				return busy.msg, nil
+			if msg, ok := repoMsg(err); ok {
+				return msg, nil
 			}
 			return "", err
 		}
-		return note + repoShow(repoSummary(dir, spec.Ref)) + "\n(temporary copy: refreshed when older than 5 min, deleted after 24 h unused)", nil
+		return note + repoShow(repoSummary(spec.copyDir(), spec.Ref)) + "\n(temporary copy; updated only when the user says so)", nil
 	}
 	u := src
 	if isGH {
@@ -758,7 +1089,7 @@ func gitClone(a gitArgs) (string, error) {
 	}
 	cmd := "git " + strings.Join(gitNetFlags, " ") + " clone --progress"
 	if a.Ref != "" {
-		cmd += " --branch " + a.Ref
+		cmd += " --branch " + shArg(a.Ref)
 	}
 	cmd += " " + shArg(u) + " " + shArg(dest)
 	rargs, _ := json.Marshal(map[string]any{"command": cmd, "name": "git clone", "tail": 5, "wait_seconds": waitSecs(a.Wait, 45, 50), "env": map[string]string{"GIT_TERMINAL_PROMPT": "0"}})
@@ -767,6 +1098,25 @@ func gitClone(a gitArgs) (string, error) {
 		out += "\n" + repoSummary(dest, "")
 	}
 	return out, err
+}
+
+// gitRepoPull updates the temporary copy of owner/name[@ref] right away (git pull on a
+// repo path: the user asked for it), or gets it when it isn't here yet.
+func gitRepoPull(s repoSpec) (string, error) {
+	s.Sub = ""
+	had := isGitCopy(s.copyDir())
+	_, note, err := ensureRepo(s, repoPrep{update: true, strict: true})
+	if err != nil {
+		if msg, ok := repoMsg(err); ok {
+			return msg, nil
+		}
+		return "", err
+	}
+	what := "updated "
+	if !had {
+		what = "got "
+	}
+	return note + what + repoShow(repoSummary(s.copyDir(), s.Ref)), nil
 }
 
 // shArg quotes one argument for the run tool's shell.

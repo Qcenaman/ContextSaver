@@ -51,13 +51,16 @@ type cmpResult struct {
 const (
 	cmpMaxFiles = 100000
 	cmpMaxBytes = 8 << 20
-	cmpMaxD     = 1500 // past this many changed lines a file's counts are estimated
+	cmpMaxD     = 1500       // past this many changed lines a file's counts are estimated
+	cmpMaxWork  = 20_000_000 // and past this many diff steps (huge, repetitive files)
 )
 
 var (
 	cmpSkipDirs   = map[string]bool{".git": true, "vendor": true, "node_modules": true}
 	errCmpTooMany = errors.New("too many files")
 	platFileRe    = regexp.MustCompile(`(?i)_(windows|linux|darwin|unix|other|posix|win|win32|nix|bsd)((?:_test)?\.[^./]+)$`)
+	// platGeneric: suffixes for "every other platform" rather than one
+	platGeneric = map[string]bool{"other": true, "unix": true, "posix": true, "nix": true}
 )
 
 func gitCompare(a gitArgs) (string, error) {
@@ -308,58 +311,81 @@ func platKey(rel string) (key, plat string) {
 	return strings.ToLower(rel[:m[0]] + rel[m[4]:m[5]]), strings.ToLower(rel[m[2]:m[3]])
 }
 
+// pairScore ranks a platform pair, best first: x_windows.go <-> x_linux.go, then the
+// shared x.go, then the catch-all x_other.go.
+func pairScore(pa, pb string) int {
+	ga, gb := platGeneric[pa], platGeneric[pb]
+	switch {
+	case pa == pb:
+		return 5 // the same platform (names that differ only in case)
+	case pa == "" || pb == "":
+		if ga || gb {
+			return 3
+		}
+		return 1
+	case ga && gb:
+		return 4
+	case ga || gb:
+		return 2
+	}
+	return 0
+}
+
 // cmpPair matches files only in A with files only in B that are the same file for
-// another platform (x_windows.go <-> x_linux.go or x.go) and compares them.
+// another platform (x_windows.go <-> x_linux.go or x.go), best pairs first, and
+// compares them.
 func cmpPair(r *cmpResult, pa, pb string) {
-	type cand struct {
-		rel, plat string
-		used      bool
-	}
-	byKey := map[string][]*cand{}
-	var all []*cand
-	for _, rb := range r.OnlyB {
+	type cand struct{ a, b, score int }
+	keyB := map[string][]int{}
+	platB := make([]string, len(r.OnlyB))
+	for j, rb := range r.OnlyB {
 		k, p := platKey(rb)
-		c := &cand{rel: rb, plat: p}
-		byKey[k] = append(byKey[k], c)
-		all = append(all, c)
+		keyB[k] = append(keyB[k], j)
+		platB[j] = p
 	}
-	var keepA []string
-	for _, ra := range r.OnlyA {
+	var cands []cand
+	for i, ra := range r.OnlyA {
 		k, p := platKey(ra)
-		var best *cand
-		bestScore := 9
-		for _, c := range byKey[k] {
-			if c.used || (p == "" && c.plat == "") {
+		for _, j := range keyB[k] {
+			if p == "" && platB[j] == "" {
 				continue
 			}
-			score := 2
-			switch {
-			case c.plat != "" && p != "" && c.plat != p:
-				score = 0 // the other platform's file
-			case c.plat == "" || p == "":
-				score = 1 // the shared file
-			}
-			if score < bestScore {
-				best, bestScore = c, score
-			}
+			cands = append(cands, cand{i, j, pairScore(p, platB[j])})
 		}
-		if best == nil {
-			keepA = append(keepA, ra)
+	}
+	sort.SliceStable(cands, func(x, y int) bool {
+		if cands[x].score != cands[y].score {
+			return cands[x].score < cands[y].score
+		}
+		if cands[x].a != cands[y].a {
+			return cands[x].a < cands[y].a
+		}
+		return cands[x].b < cands[y].b
+	})
+	usedA, usedB := make([]bool, len(r.OnlyA)), make([]bool, len(r.OnlyB))
+	for _, c := range cands {
+		if usedA[c.a] || usedB[c.b] {
 			continue
 		}
-		best.used = true
-		e, same := cmpFile(filepath.Join(pa, filepath.FromSlash(ra)), filepath.Join(pb, filepath.FromSlash(best.rel)))
+		usedA[c.a], usedB[c.b] = true, true
+		ra, rb := r.OnlyA[c.a], r.OnlyB[c.b]
+		e, same := cmpFile(filepath.Join(pa, filepath.FromSlash(ra)), filepath.Join(pb, filepath.FromSlash(rb)))
 		if same {
 			r.Same++
 			continue
 		}
-		e.A, e.B = ra, best.rel
+		e.A, e.B = ra, rb
 		r.Changed = append(r.Changed, e)
 	}
-	var keepB []string
-	for _, c := range all {
-		if !c.used {
-			keepB = append(keepB, c.rel)
+	var keepA, keepB []string
+	for i, ra := range r.OnlyA {
+		if !usedA[i] {
+			keepA = append(keepA, ra)
+		}
+	}
+	for j, rb := range r.OnlyB {
+		if !usedB[j] {
+			keepB = append(keepB, rb)
 		}
 	}
 	r.OnlyA, r.OnlyB = keepA, keepB
@@ -444,8 +470,8 @@ type diffRun struct {
 }
 
 // diffLineRuns is a minimal line diff (Myers) of a and b as runs of kept, removed and
-// added lines, with the counts. Past cmpMaxD changes the counts are estimated (approx)
-// and the differing middle shows as removed, then added.
+// added lines, with the counts. Past cmpMaxD changes (or cmpMaxWork steps) the counts
+// are estimated (approx) and the differing middle shows as removed, then added.
 func diffLineRuns(a, b []string) (runs []diffRun, add, del int, approx bool) {
 	push := func(op byte, n int) {
 		if n <= 0 {
@@ -521,7 +547,7 @@ func diffLineRuns(a, b []string) (runs []diffRun, add, del int, approx bool) {
 }
 
 // myers: the shortest edit script from a to b (Myers' O(ND) algorithm), or false when
-// it takes more than maxD edits.
+// it takes more than maxD edits or cmpMaxWork steps.
 func myers(a, b []int32, maxD int) ([]diffRun, bool) {
 	n, m := len(a), len(b)
 	if maxD > n+m {
@@ -530,6 +556,7 @@ func myers(a, b []int32, maxD int) ([]diffRun, bool) {
 	off := maxD + 1
 	v := make([]int32, 2*maxD+3)
 	var trace [][]int32
+	work := 0
 	for d := 0; d <= maxD; d++ {
 		for k := -d; k <= d; k += 2 {
 			var x int
@@ -542,6 +569,11 @@ func myers(a, b []int32, maxD int) ([]diffRun, bool) {
 			for x < n && y < m && a[x] == b[y] {
 				x++
 				y++
+				work++
+			}
+			work++
+			if work > cmpMaxWork {
+				return nil, false
 			}
 			v[off+k] = int32(x)
 			if x >= n && y >= m {

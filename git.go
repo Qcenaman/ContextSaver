@@ -30,6 +30,7 @@ type gitArgs struct {
 	N        int      `json:"n"`
 	Full     bool     `json:"full"`
 	Pair     bool     `json:"pair"`
+	Update   any      `json:"update"`
 	NoPush   bool     `json:"no_push"`
 	DryRun   bool     `json:"dry_run"`
 	MaxChars int      `json:"max_chars"`
@@ -217,6 +218,11 @@ func toolGit(raw json.RawMessage) (string, error) {
 	}
 	if action == "compare" {
 		return gitCompare(a)
+	}
+	if action == "pull" {
+		if s, ok := parseRepoSpec(a.Path); ok {
+			return gitRepoPull(s)
+		}
 	}
 
 	root, err := gitRoot(a.Path)

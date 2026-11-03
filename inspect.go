@@ -722,6 +722,9 @@ func isHeavyDir(name, full string) bool {
 	if heavyDirNames[strings.ToLower(name)] {
 		return true
 	}
+	if strings.EqualFold(name, "repos") && appHome != "" && samePath(full, reposDir()) {
+		return true // ContextSaver's temporary GitHub copies
+	}
 	if isWin {
 		l := strings.ToLower(full)
 		for _, s := range []string{`\appdata\local\temp`, `\appdata\local\packages`, `\appdata\local\microsoft`,

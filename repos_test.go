@@ -48,9 +48,9 @@ func fakeGitHub(t *testing.T) (work string) {
 		t.Skip("git not installed")
 	}
 	codeHome(t)
-	oldBase, oldWait, oldClean := repoRemoteBase, repoWait, repoAutoClean
-	t.Cleanup(func() { repoRemoteBase, repoWait, repoAutoClean = oldBase, oldWait, oldClean })
-	repoAutoClean, repoWait = false, time.Minute
+	oldBase, oldWait, oldClean, oldCheck := repoRemoteBase, repoWait, repoAutoClean, repoCheckFor
+	t.Cleanup(func() { repoRemoteBase, repoWait, repoAutoClean, repoCheckFor = oldBase, oldWait, oldClean, oldCheck })
+	repoAutoClean, repoWait, repoCheckFor = false, time.Minute, 0
 	base := t.TempDir()
 	bare := filepath.Join(base, "o", "n.git")
 	os.MkdirAll(bare, 0o755)
@@ -69,9 +69,25 @@ func fakeGitHub(t *testing.T) (work string) {
 	return work
 }
 
-func readRepoFile(t *testing.T, path string) string {
+// pushT commits file = content in work and pushes it to branch on the fake GitHub.
+func pushT(t *testing.T, work, file, content, msg, branch string) {
 	t.Helper()
-	out, _, err := callTool("read", rawJ(map[string]any{"path": path, "mode": "head"}))
+	p := filepath.Join(work, filepath.FromSlash(file))
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	os.WriteFile(p, []byte(content+"\n"), 0o644)
+	gitT(t, work, "add", "-A")
+	gitT(t, work, "commit", "-q", "-m", msg)
+	gitT(t, work, "push", "-q", "origin", "HEAD:refs/heads/"+branch)
+}
+
+// readRepo reads the first lines of path; update (nil, true or false) is the user's answer.
+func readRepo(t *testing.T, path string, update any) string {
+	t.Helper()
+	a := map[string]any{"path": path, "mode": "head"}
+	if update != nil {
+		a["update"] = update
+	}
+	out, _, err := callTool("read", rawJ(a))
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
@@ -81,11 +97,11 @@ func readRepoFile(t *testing.T, path string) string {
 	return out
 }
 
-// ageRepo makes a copy look last fetched 10 minutes ago.
-func ageRepo(dir string) {
-	st := readRepoState(dir)
-	st.Fetched = time.Now().Add(-10 * time.Minute)
-	writeRepoState(dir, st)
+func asks(out string) bool { return strings.Contains(out, "GitHub has newer commits") }
+
+func originT(t *testing.T, dir, branch string) string {
+	t.Helper()
+	return gitT(t, dir, "rev-parse", "refs/remotes/origin/"+branch)
 }
 
 func TestRepoSpecParse(t *testing.T) {
@@ -101,7 +117,7 @@ func TestRepoSpecParse(t *testing.T) {
 			t.Errorf("%q: got %+v %v", c.in, s, ok)
 		}
 	}
-	for _, bad := range []string{filepath.Join(t.TempDir(), "x"), "~/x/y", "./o/n", "../o/n", "x", "o/n/../../etc", "https://gitlab.com/o/n", "o/n@-x", "o/n@x.", "o/n@a@{1}", "o/...", "o/n.", "C:/x/y", "%TEMP%/x"} {
+	for _, bad := range []string{filepath.Join(t.TempDir(), "x"), "~/x/y", "./o/n", "../o/n", "x", "o/n/../../etc", "https://gitlab.com/o/n", "o/n@-x", "o/n@x.", "o/n@a@{1}", "o/n@a&calc", "o/...", "o/n.", "C:/x/y", "%TEMP%/x"} {
 		if s, ok := parseRepoSpec(bad); ok {
 			t.Errorf("%q must not be a repo: %+v", bad, s)
 		}
@@ -116,46 +132,86 @@ func TestRepoSpecParse(t *testing.T) {
 	if s, _ := parseRepoSpec("o/con.js"); filepath.Base(s.mainDir()) != "_con.js" {
 		t.Errorf("a Windows device name must not be a folder name: %s", s.mainDir())
 	}
+	if !validRepoRef("feature/x-1") || validRepoRef("a;b") || validRepoRef("a b") {
+		t.Error("refs: slashes are fine, shell characters and spaces are not")
+	}
+	if !isHeavyDir("repos", reposDir()) || isHeavyDir("repos", filepath.Join(appHome, "x", "repos")) {
+		t.Error("find must skip the temporary copies, and only them")
+	}
 }
 
-func TestRepoPathClonesReusesUpdatesAndChecksOutRefs(t *testing.T) {
+func TestRepoClonesWhenNeededAndAsksBeforeUpdating(t *testing.T) {
 	work := fakeGitHub(t)
-	if out := readRepoFile(t, "o/n/a.txt"); !strings.Contains(out, "v1") {
+	main := filepath.Join(reposDir(), "o", "n")
+	if exists(main) {
+		t.Fatal("nothing may be cloned before a call needs it")
+	}
+	if out := readRepo(t, "o/n/a.txt", nil); !strings.Contains(out, "v1") {
 		t.Fatalf("first use: %s", out)
 	}
-	main := filepath.Join(reposDir(), "o", "n")
 	if !exists(filepath.Join(main, ".git")) {
 		t.Fatalf("no copy in %s", main)
 	}
-	// a new commit on GitHub: a copy younger than 5 minutes is reused as it is...
-	os.WriteFile(filepath.Join(work, "a.txt"), []byte("v2\n"), 0o644)
-	gitT(t, work, "commit", "-q", "-am", "second")
-	gitT(t, work, "push", "-q", "origin", "HEAD:refs/heads/main")
-	if out := readRepoFile(t, "o/n/a.txt"); !strings.Contains(out, "v1") {
-		t.Fatalf("a fresh copy should be reused: %s", out)
+	fetched, origin := readRepoState(main).Fetched, originT(t, main, "main")
+	// GitHub moves on: the copy stays as it is and the call asks first
+	pushT(t, work, "a.txt", "v2", "second", "main")
+	if out := readRepo(t, "o/n/a.txt", nil); !asks(out) || !strings.Contains(out, "o/n (from ") || !strings.Contains(out, "update:true") || strings.Contains(out, "v1") {
+		t.Fatalf("want the question, got %q", out)
 	}
-	// ...an older one is fetched and fast-forwarded instead of failing
-	ageRepo(main)
-	if out := readRepoFile(t, "o/n/a.txt"); !strings.Contains(out, "v2") {
-		t.Fatalf("not updated: %s", out)
+	if originT(t, main, "main") != origin || !readRepoState(main).Fetched.Equal(fetched) {
+		t.Fatal("asking must not fetch or update the copy")
 	}
-	// rewritten history: reset to origin
+	// no: the copy as it is, and no question again for that commit
+	if out := readRepo(t, "o/n/a.txt", false); !strings.Contains(out, "v1") {
+		t.Fatalf("update:false: %s", out)
+	}
+	if out := readRepo(t, "o/n/a.txt", nil); asks(out) || !strings.Contains(out, "v1") {
+		t.Fatalf("asked again after no: %s", out)
+	}
+	if originT(t, main, "main") != origin {
+		t.Fatal("no must not fetch")
+	}
+	// yes later on: a fast-forward
+	if out := readRepo(t, "o/n/a.txt", "yes"); !strings.Contains(out, "v2") {
+		t.Fatalf("update yes: %s", out)
+	}
+	// rewritten history on GitHub asks again; yes resets the copy to it
 	os.WriteFile(filepath.Join(work, "a.txt"), []byte("v3\n"), 0o644)
-	gitT(t, work, "commit", "-q", "--amend", "-am", "second, rewritten")
+	os.WriteFile(filepath.Join(work, "new.txt"), []byte("new\n"), 0o644)
+	gitT(t, work, "add", "-A")
+	gitT(t, work, "commit", "-q", "--amend", "-m", "second, rewritten")
 	gitT(t, work, "push", "-q", "--force", "origin", "HEAD:refs/heads/main")
-	ageRepo(main)
-	if out := readRepoFile(t, "o/n/a.txt"); !strings.Contains(out, "v3") {
-		t.Fatalf("not reset to the rewritten history: %s", out)
+	if out := readRepo(t, "o/n/a.txt", nil); !asks(out) {
+		t.Fatalf("a newer commit must ask again: %s", out)
+	}
+	if out := readRepo(t, "o/n/a.txt", true); !strings.Contains(out, "v3") {
+		t.Fatalf("update:true: %s", out)
+	}
+	if out := readRepo(t, "o/n/a.txt", nil); asks(out) || !strings.Contains(out, "v3") {
+		t.Fatalf("after the update: %s", out)
 	}
 	// @ref: a tag, a branch and a commit, each in its own worktree
 	first := gitT(t, work, "rev-list", "--max-parents=0", "HEAD")
 	for _, ref := range []string{"v1", "dev", first[:10]} {
-		if out := readRepoFile(t, "o/n@"+ref+"/a.txt"); !strings.Contains(out, "v1") {
+		if out := readRepo(t, "o/n@"+ref+"/a.txt", nil); !strings.Contains(out, "v1") {
 			t.Errorf("@%s: %s", ref, out)
 		}
 	}
 	if !exists(filepath.Join(reposDir(), "o", "n@v1", "a.txt")) {
 		t.Error("no n@v1 worktree")
+	}
+	// a branch copy asks when the branch moves on; tag and commit copies never do
+	gitT(t, work, "push", "-q", "origin", "HEAD:refs/heads/dev")
+	if out := readRepo(t, "o/n@dev/a.txt", nil); !asks(out) || !strings.Contains(out, "o/n@dev (from ") {
+		t.Fatalf("o/n@dev: %s", out)
+	}
+	if out := readRepo(t, "o/n@dev/a.txt", true); !strings.Contains(out, "v3") {
+		t.Fatalf("o/n@dev update:true: %s", out)
+	}
+	for _, ref := range []string{"v1", first[:10]} {
+		if out := readRepo(t, "o/n@"+ref+"/a.txt", nil); asks(out) || !strings.Contains(out, "v1") {
+			t.Errorf("@%s must not ask: %s", ref, out)
+		}
 	}
 	// find, compare and outline answer with owner/name paths
 	out, _, err := callTool("find", rawJ(map[string]any{"path": []string{"o/n@v1"}, "text": "Hello"}))
@@ -163,12 +219,41 @@ func TestRepoPathClonesReusesUpdatesAndChecksOutRefs(t *testing.T) {
 		t.Errorf("find: %q %v", out, err)
 	}
 	out, _, err = callTool("git", rawJ(map[string]any{"action": "compare", "path": "o/n@v1", "to": "o/n"}))
-	if err != nil || !strings.Contains(out, "A: o/n@v1 (2 files)") || !strings.Contains(out, "changed (1): a.txt +1 -1") || !strings.Contains(out, "same: 1") || strings.Contains(out, reposDir()) {
-		t.Errorf("compare: %q %v", out, err)
+	for _, want := range []string{"A: o/n@v1 (2 files)", "B: o/n (3 files)", "only in A (0): none", "only in B (1): new.txt", "changed (1): a.txt +1 -1", "same: 1"} {
+		if err != nil || !strings.Contains(out, want) {
+			t.Errorf("compare: missing %q in %q %v", want, out, err)
+		}
+	}
+	if strings.Contains(out, reposDir()) {
+		t.Errorf("compare shows the local folder: %s", out)
 	}
 	out, _, err = callCompact(rawJ(map[string]any{"c": "outline", "a": map[string]any{"path": "o/n/sub"}}))
 	if err != nil || !strings.Contains(out, "Hello") {
 		t.Errorf("outline: %q %v", out, err)
+	}
+}
+
+func TestGitPullUpdatesACopyRightAway(t *testing.T) {
+	work := fakeGitHub(t)
+	readRepo(t, "o/n/a.txt", nil)
+	pushT(t, work, "a.txt", "v2", "second", "main")
+	out, _, err := callTool("git", rawJ(map[string]any{"action": "pull", "path": "o/n"}))
+	if err != nil || !strings.HasPrefix(out, "updated o/n: branch main, last commit") || !strings.Contains(out, "second") {
+		t.Fatalf("pull o/n: %q %v", out, err)
+	}
+	if out := readRepo(t, "o/n/a.txt", nil); asks(out) || !strings.Contains(out, "v2") {
+		t.Fatalf("after pull: %s", out)
+	}
+	// a branch copy that isn't here yet starts at GitHub's newest commit on it
+	gitT(t, work, "push", "-q", "origin", "HEAD:refs/heads/dev")
+	out, _, err = callTool("git", rawJ(map[string]any{"action": "pull", "path": "o/n@dev"}))
+	if err != nil || !strings.HasPrefix(out, "got o/n@dev: ref dev, last commit") || !strings.Contains(out, "second") {
+		t.Fatalf("pull o/n@dev: %q %v", out, err)
+	}
+	pushT(t, work, "a.txt", "v3", "third", "main")
+	out, _, err = callCompact(rawJ(map[string]any{"c": "git", "a": map[string]any{"action": "pull", "path": "o/n"}}))
+	if err != nil || !strings.Contains(out, "updated o/n") || !strings.Contains(out, "third") {
+		t.Fatalf("pc git pull: %q %v", out, err)
 	}
 }
 
@@ -197,14 +282,12 @@ func TestRepoBigFirstCloneSaysCallAgain(t *testing.T) {
 	}
 }
 
-func TestGitCloneUpdatesAnExistingClone(t *testing.T) {
+func TestGitCloneUpdatesTheUsersCloneAndAsksForCopies(t *testing.T) {
 	work := fakeGitHub(t)
 	url := repoRemoteBase + "o/n.git"
 	dest := filepath.Join(t.TempDir(), "mine")
 	gitT(t, filepath.Dir(dest), "clone", "-q", url, dest)
-	os.WriteFile(filepath.Join(work, "a.txt"), []byte("v2\n"), 0o644)
-	gitT(t, work, "commit", "-q", "-am", "second")
-	gitT(t, work, "push", "-q", "origin", "HEAD:refs/heads/main")
+	pushT(t, work, "a.txt", "v2", "second", "main")
 	out, err := toolGit(rawJ(map[string]any{"action": "clone", "url": url, "to": dest}))
 	if err != nil || !strings.Contains(out, "already cloned, updated") || !strings.Contains(out, "branch main") || !strings.Contains(out, "second") {
 		t.Fatalf("clone into an existing clone: %q %v", out, err)
@@ -218,13 +301,38 @@ func TestGitCloneUpdatesAnExistingClone(t *testing.T) {
 	if _, err := toolGit(rawJ(map[string]any{"action": "clone", "url": url, "to": other})); err == nil || !strings.Contains(err.Error(), "already a clone of") {
 		t.Errorf("a clone of another repo must be refused, got %v", err)
 	}
-	// no destination: the temporary copies
+	// no destination: the temporary copies, asked about like any other use
 	out, err = toolGit(rawJ(map[string]any{"action": "clone", "url": "o/n"}))
 	if err != nil || !strings.HasPrefix(out, "o/n: branch main, last commit") || !strings.Contains(out, "second") {
 		t.Fatalf("clone to the temporary copies: %q %v", out, err)
 	}
-	if !exists(filepath.Join(reposDir(), "o", "n", ".git")) {
-		t.Error("no temporary copy")
+	pushT(t, work, "a.txt", "v3", "third", "main")
+	if out, err := toolGit(rawJ(map[string]any{"action": "clone", "url": "o/n"})); err != nil || !asks(out) {
+		t.Fatalf("cloning a repo whose copy is older must ask: %q %v", out, err)
+	}
+	if out, err := toolGit(rawJ(map[string]any{"action": "clone", "url": "o/n", "update": "yes"})); err != nil || !strings.Contains(out, "third") {
+		t.Fatalf("clone with update yes: %q %v", out, err)
+	}
+}
+
+func TestRepoQuestionForChat(t *testing.T) {
+	work := fakeGitHub(t)
+	readRepo(t, "o/n/a.txt", nil)
+	if q := repoQuestion("read", map[string]any{"path": "o/n/a.txt"}); q != "" {
+		t.Fatalf("a copy that is up to date must not ask: %q", q)
+	}
+	pushT(t, work, "a.txt", "v2", "second", "main")
+	if q := repoQuestion("cat", map[string]any{"path": "o/n/a.txt"}); !strings.Contains(q, "o/n (from ") || !strings.HasSuffix(q, "update first?") {
+		t.Fatalf("got %q", q)
+	}
+	if q := repoQuestion("git", map[string]any{"action": "compare", "path": "o/n", "to": "o/n@v1"}); !strings.Contains(q, "o/n (from ") {
+		t.Fatalf("compare: %q", q)
+	}
+	if q := repoQuestion("read", map[string]any{"path": "o/n/a.txt", "update": false}); q != "" {
+		t.Fatalf("an answered call must not ask: %q", q)
+	}
+	if q := repoQuestion("write", map[string]any{"path": "o/n/a.txt"}); q != "" {
+		t.Fatalf("write takes no repo paths: %q", q)
 	}
 }
 
@@ -236,7 +344,7 @@ func TestRepoCopiesAreReadOnly(t *testing.T) {
 			t.Errorf("%s on o/n: %v", act, err)
 		}
 	}
-	readRepoFile(t, "o/n/a.txt")
+	readRepo(t, "o/n/a.txt", nil)
 	local := filepath.Join(reposDir(), "o", "n")
 	for _, act := range []string{"commit", "push"} {
 		if _, err := toolGit(rawJ(map[string]any{"action": act, "path": local, "message": "x"})); err == nil || !strings.Contains(err.Error(), "read-only") {
@@ -269,6 +377,7 @@ func TestGitCompareFolders(t *testing.T) {
 	put(a, "onlya.txt", "a\n")
 	put(b, "onlyb.txt", "b\n")
 	put(a, "x_windows.go", "package x\n\nconst p = 1\n")
+	put(a, "x_other.go", "package x\n\nconst p = 3\n")
 	put(b, "x_linux.go", "package x\n\nconst p = 2\n")
 	for _, skip := range []string{"vendor/v.go", "node_modules/m/m.js", ".git/HEAD", "build/out.txt"} {
 		put(a, skip, "x")
@@ -278,7 +387,7 @@ func TestGitCompareFolders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(r.OnlyA, ","); got != "onlya.txt,x_windows.go" {
+	if got := strings.Join(r.OnlyA, ","); got != "onlya.txt,x_other.go,x_windows.go" {
 		t.Errorf("only in A: %s", got)
 	}
 	if got := strings.Join(r.OnlyB, ","); got != "onlyb.txt,x_linux.go" {
@@ -288,11 +397,12 @@ func TestGitCompareFolders(t *testing.T) {
 		t.Errorf("same %d (want 3: CRLF vs LF is the same), changed %+v", r.Same, r.Changed)
 	}
 
+	// pair: x_windows.go goes with x_linux.go before the catch-all x_other.go does
 	out, err := toolGit(rawJ(map[string]any{"action": "compare", "path": a, "to": b, "pair": true, "full": true, "paths": []string{"changed.go"}, "n": 2}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"only in A (1): onlya.txt\n", "only in B (1): onlyb.txt\n", "changed (3): changed.go +2 -1, x_windows.go <-> x_linux.go +1 -1 … +1 more", "same: 3", "--- changed.go +2 -1\n@@ A:4 B:4\n-func b() {}\n+func b2() {}\n@@ A:6 B:6\n+func d() {}"} {
+	for _, want := range []string{"only in A (2): onlya.txt, x_other.go\n", "only in B (1): onlyb.txt\n", "changed (3): changed.go +2 -1, x_windows.go <-> x_linux.go +1 -1 … +1 more", "same: 3", "--- changed.go +2 -1\n@@ A:4 B:4\n-func b() {}\n+func b2() {}\n@@ A:6 B:6\n+func d() {}"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
@@ -416,6 +526,10 @@ func TestRepoShowWritesOwnerName(t *testing.T) {
 		if got := repoShow(in); got != "o/n@v1/sub/x.go:3: hi" {
 			t.Errorf("%q -> %q", in, got)
 		}
+	}
+	q := filepath.Join(reposDir(), "o", "n", "b.go")
+	if got := repoShow(p + " and " + q); got != "o/n@v1/sub/x.go and o/n/b.go" {
+		t.Errorf("two paths on one line: %q", got)
 	}
 	s, _ := parseRepoSpec("Qcenaman/ContextSaver")
 	s.remember()
