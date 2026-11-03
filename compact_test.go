@@ -40,10 +40,10 @@ func TestPCToolList(t *testing.T) {
 	if !strings.Contains(p.A.Description, `"path"`) {
 		t.Fatal("a has no example")
 	}
-	// ~4 bytes per token; keep tools/list under ~300 tokens (includes the line about the
-	// user's own apps, which stops the model web-searching them)
+	// ~4 bytes per token; keep tools/list under ~310 tokens (includes the line about the
+	// user's own apps, which stops the model web-searching them, and GitHub owner/name paths)
 	t.Logf("tools/list: %d bytes (~%d tokens)", len(b), len(b)/4)
-	if len(b) > 1200 {
+	if len(b) > 1250 {
 		t.Fatalf("tools/list is %d bytes (~%d tokens)", len(b), len(b)/4)
 	}
 }

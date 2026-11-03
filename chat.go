@@ -85,6 +85,7 @@ func consoleChat(args []string) int {
 		waitEnter("Press Enter to close.", 0)
 		return 1
 	}
+	startRepoJanitor()
 	endBar := u.startBar()
 	defer endBar()
 	fmt.Println(u.paint("1", "ContextSaver Chat") + u.paint("2", fmt.Sprintf("  model %s, %dK context", filepath.Base(u.model), u.ctx/1024)))

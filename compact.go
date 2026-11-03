@@ -18,16 +18,16 @@ import (
 // fetched on demand with c=help, and every result is capped; the rest is kept on
 // disk and paged with c=more.
 
-const compactDesc = `The user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths.
+const compactDesc = `The user's Windows PC; you CAN act, so call this instead of refusing. c=command, a=args, absolute paths or GitHub owner/name[@ref][/sub].
 open{target} find{path[],name,text} ls{path} read{path,from_line,lines,pattern} write{path,content} edit{path,find,replace} run{command} web{query|url} ai{paths[],question} office{action,path} rag{query|text} sys{action} model{name} more{id}
-git{action:commit|push|login|release|ci,path,message} check{path,action:build|test|compile,target} outline{path} new{kind,name} deps export
+git{action:commit|push|login|release|ci|compare,path,to,message} check{path,action:build|test|compile,target} outline{path} new{kind,name} deps export
 Also: plan files job saved browser window media. phone{action:install,app}=user's phone, not adb. help{c}=all args.
 The user's own apps (AdbSaver RemoteAI TokenSaver...) are in D:\Claude Apps + github Qcenaman/<name>: never web-search them. me = about the user.`
 
 // clineDesc: with "mcp --for cline" only what Cline lacks is advertised (Cline has its
 // own read/write/edit/run/find/browser); every command still works.
-const clineDesc = `The user's PC beyond Cline's own tools; you CAN act. c=command, a=args, absolute paths.
-git{action:status|diff|log|commit|push|pull|clone|login|ci,path,message} check{path,action:check|build} after every code change
+const clineDesc = `The user's PC beyond Cline's own tools; you CAN act. c=command, a=args, absolute paths or GitHub owner/name[@ref][/sub].
+git{action:status|diff|log|commit|push|pull|clone|login|ci|compare,path,to,message} check{path,action:check|build} after every code change
 compile{path,target:linux|windows|android} outline{path} test{path,name} new{kind,name} deps{path,action,name} release{path,version} logcat{app}
 rag{query|text} office{action,path} web{query|url} ai{paths[],question} model{name}
 Also: window media sys saved job phone export more. help{c} = all args.`
@@ -254,7 +254,7 @@ func compactDispatch(c string, a map[string]any) (string, []toolImage, error) {
 		out, err := toolSetup(a)
 		return out, nil, err
 	case "outline", "symbols":
-		out, err := toolOutline(a)
+		out, err := repoRun("outline", a, func() (string, error) { return toolOutline(a) })
 		return out, nil, err
 	case "test", "tests":
 		out, err := toolTest(a)
@@ -732,9 +732,9 @@ func openTarget(t, args string) (string, error) {
 // shortHelp: what a local model needs to call each command, in as few tokens as
 // possible. help{c,full:true} returns the complete description.
 var shortHelp = map[string]string{
-	"find":    "find{path[],name,text,regex,lines(3),limit,include,exclude,min_size,max_size,newer_than,older_than}: files by name/size/date/text, with matching lines.",
-	"ls":      "ls{path,recursive,include,exclude}: folder overview: counts, sizes, types, biggest files.",
-	"read":    "read{path,mode:info|head|tail|lines|grep|text|image,from_line,lines,pattern,context,pages:\"3-5\",changes}: part of a file; Office/PDF as text, pictures via OCR.",
+	"find":    "find{path[],name,text,regex,lines(3),limit,include,exclude,min_size,max_size,newer_than,older_than}: files by name/size/date/text, with matching lines. path may be owner/name[@ref][/sub] (GitHub).",
+	"ls":      "ls{path,recursive,include,exclude}: folder overview: counts, sizes, types, biggest files. path may be owner/name[@ref] (GitHub).",
+	"read":    "read{path,mode:info|head|tail|lines|grep|text|image,from_line,lines,pattern,context,pages:\"3-5\",changes}: part of a file; Office/PDF as text, pictures via OCR. path may be owner/name[@ref]/file (GitHub).",
 	"run":     "run{command,shell:cmd|powershell,cwd,elevated,wait_for,keep_running,tail}: exit code, error lines, last lines.",
 	"web":     "web{action:search|read|find|links|ask,query,url,urls[],pattern,question,from_line,lines}: pages as text; ask = answer from pages.",
 	"ai":      "ai{action:ask|summarize|classify,paths[],question,categories[],move_to}: local AI reads files and pictures.",
@@ -747,11 +747,11 @@ var shortHelp = map[string]string{
 	"browser": "browser{action:open|text|find|links|click|fill|press|wait|console|close,url,target,value,pattern,show}: real Chrome, text only; localhost:PORT works; console = page errors since the last call.",
 	"window":  "window{action,window:title|program|pid}: list{filter} text ocr{x,y,w,h,boxes} copy wait{pattern} clipboard{text} screenshot{question}\ndo{steps:[{click:name}{type,into}{press}{wait}{click_text,nth}{click_at:[x,y]}{move:[x,y]}{drag:[x1,y1,x2,y2]}{scroll:n}{hold,secs}],button,then:\"text\"}",
 	"media":   "media{action:info|transcript|frames,path,language,timestamps}: audio/video as text.",
-	"git":     "git{action:status|diff|log|commit|push|pull|clone|login|ci,path,message,paths[],full,ref,n,url,to,wait_seconds}: never as admin; login = GitHub sign-in (gives a code for the user); ci = latest GitHub Actions run, failing lines only.",
+	"git":     "git{action:status|diff|log|commit|push|pull|clone|login|ci|compare,path,message,paths[],full,ref,n,url,to,pair,wait_seconds}: never as admin; login = GitHub sign-in (gives a code for the user); ci = latest GitHub Actions run, failing lines only. path may be owner/name[@ref] (GitHub copy, read-only). clone{url,to}: no to = temporary copy; an existing clone is updated. compare{path,to,pair,n,paths[],full}: A vs B (folders or owner/name[@ref]): only in A/B, changed +/-, same; pair matches x_windows.go with x_linux.go/x.go; paths[]+full = their changed lines.",
 	"check":   "check{path,action,fix,name,target,out}: check = lint/type-check; build = build+tests; test = tests (name filters); compile = runnable files for target linux|windows|android into dist/<target>. Failing lines only. Run after every code change.",
 	"compile": "compile{path,target:linux|windows|android,out,release}: runnable files into out (default <project>/dist/<target>): Go, Gradle (.apk), Flutter, Rust, CMake/Make/C/C++, .NET, Electron, Python; one source file works too.",
 	"test":    "test{path,name}: run the tests (only those matching name); failing lines only.",
-	"outline": "outline{path,name}: functions/types with line numbers for a file or project; name filters. Read only the lines you need after.",
+	"outline": "outline{path,name}: functions/types with line numbers for a file or project (or owner/name[@ref][/sub]); name filters. Read only the lines you need after.",
 	"new":     "new{kind:go|android|web|python|rust|c,name,path,public,repo}: project with tests + GitHub Actions in ~/Projects/<name>, committed, pushed to a private GitHub repo.",
 	"export":  "export{path,files:{\"rel/name\":\"text\"}}: write many files at once (undo: job undo). export{path,zip:true,out}: the project as a .zip (no .git, deps, builds).",
 	"deps":    "deps{path,action:list|add|update|remove,name}: go/npm/cargo/pip(.venv)/gradle; returns the manifest lines that changed.",

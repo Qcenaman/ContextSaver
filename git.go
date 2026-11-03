@@ -29,6 +29,7 @@ type gitArgs struct {
 	Paths    []string `json:"paths"`
 	N        int      `json:"n"`
 	Full     bool     `json:"full"`
+	Pair     bool     `json:"pair"`
 	NoPush   bool     `json:"no_push"`
 	DryRun   bool     `json:"dry_run"`
 	MaxChars int      `json:"max_chars"`
@@ -212,32 +213,18 @@ func toolGit(raw json.RawMessage) (string, error) {
 		return gitLogin()
 	}
 	if action == "clone" {
-		if strings.TrimSpace(a.URL) == "" {
-			return "", errors.New("clone needs url")
-		}
-		u := a.URL
-		if !strings.Contains(u, "://") && !strings.HasPrefix(u, "git@") && strings.Count(u, "/") == 1 {
-			u = "https://github.com/" + u
-		}
-		to := a.To
-		if to == "" {
-			to = a.Path
-		}
-		if strings.TrimSpace(to) == "" {
-			return "", errors.New("clone needs to (target folder)")
-		}
-		cmd := "git " + strings.Join(gitNetFlags, " ") + " clone --progress"
-		if a.Ref != "" {
-			cmd += " --branch " + a.Ref
-		}
-		cmd += fmt.Sprintf(" %q %q", u, to)
-		rargs, _ := json.Marshal(map[string]any{"command": cmd, "name": "git clone", "tail": 5, "wait_seconds": waitSecs(a.Wait, 45, 50), "env": map[string]string{"GIT_TERMINAL_PROMPT": "0"}})
-		return toolRun(rargs)
+		return gitClone(a)
+	}
+	if action == "compare" {
+		return gitCompare(a)
 	}
 
 	root, err := gitRoot(a.Path)
 	if err != nil {
 		return "", err
+	}
+	if isRepoCopy(root) && (action == "commit" || action == "push" || action == "release") {
+		return "", errors.New(repoReadOnly)
 	}
 	var b strings.Builder
 	net := 5 * time.Minute
@@ -412,7 +399,7 @@ func toolGit(raw json.RawMessage) (string, error) {
 	case "handoff":
 		return gitHandoff(root, a, maxChars)
 	}
-	return "", fmt.Errorf("unknown action %q (status, log, diff, commit, push, pull, clone, release, handoff)", action)
+	return "", fmt.Errorf("unknown action %q (status, log, diff, commit, push, pull, clone, compare, release, handoff)", action)
 }
 
 func firstErr(out string, err error) string {
